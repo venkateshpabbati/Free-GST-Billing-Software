@@ -1205,7 +1205,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
               extraPages loop then captures it as its own PDF page. */}
           {!_ps.termsSeparatePage && (() => {
             const termsHtml = customTerms ? DOMPurify.sanitize(customTerms) : '';
-            const hasTerms = termsHtml && termsHtml.replace(/<[^>]*>/g, '').trim();
+            const hasTerms = hasVisibleTextFromHtml(termsHtml);
             return showTerms && hasTerms ? (
               <div className="inv-footer-block">
                 <h4 className="inv-section-label">{getLabel(_ps_labels, 'terms')}</h4>
