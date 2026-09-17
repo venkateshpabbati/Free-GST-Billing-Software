@@ -5,6 +5,25 @@ import { getFinancialYearLabel } from './utils';
 
 const API = '/api';
 
+function secureRandomBase36(length = 6) {
+  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const base = alphabet.length; // 36
+  const maxUnbiased = 252; // largest multiple of 36 below 256
+  let out = '';
+
+  while (out.length < length) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    for (const b of bytes) {
+      if (b >= maxUnbiased) continue; // rejection sampling to avoid modulo bias
+      out += alphabet[b % base];
+      if (out.length === length) break;
+    }
+  }
+
+  return out;
+}
+
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -136,7 +155,7 @@ export const getNextInvoiceNumber = async (prefix = 'INV', { peek = false, expli
   const pfx = explicitPrefix ? prefix : (settings.brandPrefix || prefix);
 
   if (settings.format === 'random') {
-    const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const rand = secureRandomBase36(6);
     return `${pfx}${settings.separator}${rand}`;
   }
 
