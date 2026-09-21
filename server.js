@@ -548,6 +548,13 @@ app.post('/api/meta/:key/increment', (req, res) => {
 // ========================
 // EXPORT / IMPORT
 // ========================
+const importRouteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // limit import attempts per IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.get('/api/export', (req, res) => {
   const data = {
     bills: readAllFromDir('bills'),
@@ -566,7 +573,7 @@ app.get('/api/export', (req, res) => {
   res.json(data);
 });
 
-app.post('/api/import', (req, res) => {
+app.post('/api/import', importRouteLimiter, (req, res) => {
   // v1.10.0 — Match POST /api/bills' overwrite semantics for bills.
   // v1.10.31 — Data-F5.1 fix: overwrite gating now applies to EVERY
   // collection, not just bills. Previously clients / templates / products
