@@ -48,6 +48,22 @@ export const formatCurrency = (amount, currency = 'INR') => {
   }).format(amount || 0);
 };
 
+// v1.10.66 (#63) — CSV cells that start with = + - @ (or a tab / carriage
+// return) are run as FORMULAS by Excel, LibreOffice and Google Sheets. A client
+// or item named `=HYPERLINK("http://evil.example","Invoice")` turned into a
+// live link inside an exported ledger. Such text is prefixed with an
+// apostrophe so the spreadsheet shows it as plain text. Plain numbers —
+// including negatives such as a credit note's -500.00 — are left alone so the
+// amount columns still add up.
+const CSV_FORMULA_START = /^[=+\-@\t\r]/;
+const CSV_PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+export const toCsvCell = (value) => {
+  let s = String(value ?? '');
+  if (s.length > 1 && CSV_FORMULA_START.test(s) && !CSV_PLAIN_NUMBER.test(s)) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+export const toCsvLine = (cells) => cells.map(toCsvCell).join(',');
+
 // Compute the per-item tax breakdown.
 // `taxInclusive=true` means rate already includes tax (MRP-style) — back-calculate the
 // taxable value. This matches the bill form's "Prices include tax" toggle.
@@ -255,11 +271,21 @@ export function computeInvoiceTotals(opts) {
     warnings.push('Your business state is not set. Interstate/intra-state detection cannot be trusted. Set it in Settings → Company Details before issuing GST invoices.');
     needsProfileFix = true;
   }
-  if (isIndia && showGST && !placeOfSupplyRaw) {
+  // v1.10.66 (#61) — a client outside India makes this an export, and an
+  // export's place of supply is outside India, so any tax charged is IGST —
+  // never CGST + SGST. The CLIENT'S COUNTRY decides it, not the currency: an
+  // Indian client can be billed in USD without the supply leaving the state.
+  // An explicit Indian place of supply (goods delivered here for a foreign
+  // buyer) still wins, so that case follows the normal state comparison.
+  const clientCountry = (client.country || '').trim();
+  const isExportClient = isIndia && !!clientCountry && clientCountry !== 'India'
+    && !getStateCode((details.placeOfSupply || '').trim());
+
+  if (isIndia && showGST && !placeOfSupplyRaw && !isExportClient) {
     warnings.push('Place of supply is not set. Falling back to client state.');
   }
 
-  const isInterstate = isIndia && (isSEZ || (
+  const isInterstate = isIndia && (isSEZ || isExportClient || (
     !!businessCode && !!posCode && businessCode !== posCode
   ));
 
@@ -993,6 +1019,112 @@ export const getPaperSize = (key, options = {}) => {
 //
 //   getFinancialYearStart(new Date('2027-01-15')) === 2026   (FY 2026-27)
 //   getFinancialYearStart(new Date('2027-04-01')) === 2027   (FY 2027-28)
+// v1.10.60 — reported (#50, @sangwanmail-eng): "Terms and conditions show
+// as paragraph in formatted".
+//
+// The 13 built-in presets all use real <ul>/<li> markup and render as
+// lists. But many users type or paste their own terms from Word as ONE
+// paragraph with the numbers typed by hand:
+//
+//   <p>1. Payment due in 15 days. 2. Interest 18% p.a. 3. ...</p>
+//
+// That is genuinely a single paragraph, so no stylesheet can separate it —
+// the app was faithfully rendering what was written. It still reads as a
+// wall of text on the invoice, which is the complaint.
+//
+// This splits such a paragraph at the numbering. It is deliberately
+// conservative: it needs THREE OR MORE markers before it will touch
+// anything, so ordinary prose containing "Section 2. of the Act" or a
+// price like "Rs 2. 50" is left alone. Content already using <li> or <br>
+// is skipped entirely — that is already structured.
+export const splitNumberedTerms = (html) => {
+  if (!html || typeof html !== 'string') return html;
+  if (/<(li|br)[ />]/i.test(html)) return html;   // already structured — leave it alone
+  const marker = /(^|[\s>])(\d{1,2})\.\s+/g;
+  const count = (html.match(marker) || []).length;
+  if (count < 3) return html;                         // not a list
+  // Break before every marker except the first, so item 1 keeps its place.
+  let seen = 0;
+  return html.replace(marker, (m, pre, num) => {
+    seen += 1;
+    return seen === 1 ? m : `${pre}<br />${num}. `;
+  });
+};
+
+// v1.10.64 — requested (#55, @sangwanmail-eng): "keep both companies' data
+// stored and displayed separately based on their respective GST numbers. An
+// invoice belonging to one company should not appear under the other."
+//
+// Multi-business profiles already switch the letterhead, but every list —
+// dashboard, GST returns, reports — showed ALL invoices regardless of which
+// business was active. Two businesses meant one mixed set of books.
+//
+// Scoping by GSTIN rather than by a profile id is deliberate, and it is what
+// makes this safe to ship:
+//
+//   * Older invoices carry NO profile id — the field was added later. Had we
+//     filtered on it, every historical invoice would have vanished from the
+//     user's books the moment they updated. In accounting software that is
+//     the worst failure available.
+//   * Every invoice, however old, stores the seller's details at save time
+//     under `data.profile`, so the GSTIN is always there to match on.
+//   * It survives a rename. This user has invoices reading "Dice Codes" and
+//     "Anahat Exclusive" under one GSTIN — the same business, renamed. GSTIN
+//     keeps them together; matching on name would have split them in two.
+//
+// A business with no GSTIN yet (not registered, or mid-setup) falls back to
+// its name. And anything we cannot attribute at all is SHOWN, never hidden —
+// if in doubt the user sees their invoice.
+const normaliseGstin = (v) => String(v || '').trim().toUpperCase();
+const normaliseName = (v) => String(v || '').trim().toLowerCase();
+
+// v1.10.65 (#58 item 3) — expenses, purchase bills and recurring templates
+// have no `data.profile` block: invoices snapshot the seller onto themselves,
+// those records never did. So they also carry a plain `ownerGstin` /
+// `ownerName`, stamped when they are saved.
+//
+// Note the field names. A purchase bill already has `supplierGstin` and an
+// expense has `vendorGstin` — those are the OTHER party. Confusing the two
+// would file your own purchases under your supplier's business, so the
+// owning business is named `owner*` and never read from those fields.
+export const getRecordSeller = (record) => ({
+  gstin: normaliseGstin(record?.data?.profile?.gstin ?? record?.ownerGstin),
+  name: normaliseName(record?.data?.profile?.businessName ?? record?.ownerName),
+});
+
+/**
+ * Has this record never been attributed to any business?
+ *
+ * These are records saved before businesses were kept separate. They show
+ * under every business, because hiding them would be worse than showing them
+ * twice — which is also why the user is offered the chance to assign them
+ * rather than having it done silently on their behalf.
+ */
+export const isUnassignedToBusiness = (record) => {
+  const seller = getRecordSeller(record);
+  return !seller.gstin && !seller.name;
+};
+
+/**
+ * Does this saved record belong to the business currently selected?
+ *
+ * Returns TRUE when it cannot be determined, so an un-attributable record is
+ * always visible rather than silently lost.
+ */
+export const belongsToProfile = (record, profile) => {
+  if (!profile) return true;                     // no active business — show everything
+  const seller = getRecordSeller(record);
+  const activeGstin = normaliseGstin(profile.gstin);
+  const activeName = normaliseName(profile.businessName);
+
+  // Prefer GSTIN: unique per taxpayer, and unaffected by renames.
+  if (seller.gstin && activeGstin) return seller.gstin === activeGstin;
+  // Fall back to the business name when either side has no GSTIN.
+  if (seller.name && activeName) return seller.name === activeName;
+  // Not attributable — show it.
+  return true;
+};
+
 export const getFinancialYearStart = (date = new Date()) => (
   date.getMonth() >= 3 ? date.getFullYear() : date.getFullYear() - 1
 );

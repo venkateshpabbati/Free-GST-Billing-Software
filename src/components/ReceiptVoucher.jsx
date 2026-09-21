@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Receipt, Plus, Trash2, Search, Printer, Pencil } from 'lucide-react';
 import { getAllReceipts, saveReceipt, deleteReceipt, getAllBills, getProfile, getNextInvoiceNumber, saveBill } from '../store';
-import { formatCurrency, numberToWords } from '../utils';
+import { formatCurrency, numberToWords, belongsToProfile, isUnassignedToBusiness } from '../utils';
+import UnassignedBanner from './UnassignedBanner';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 
@@ -33,9 +34,15 @@ export default function ReceiptVoucher() {
   const loadData = async () => {
     try {
       const [recs, bls, prof] = await Promise.all([getAllReceipts(), getAllBills(), getProfile()]);
-      setReceipts(recs);
-      setBills(bls);
-      setProfile(prof);
+      // v1.10.66 (#64 item 2) — receipts belong to one business, like its
+      // invoices. Both lists are narrowed: the receipts shown, and the
+      // invoices offered in Quick Select and matched by "Against Invoice".
+      // Two businesses can each have an INV/2026-27/0001, so matching across
+      // them could post a payment against the other company's invoice.
+      // Receipts saved before this carry no business and are always shown.
+      setReceipts((recs || []).filter(r => belongsToProfile(r, prof)));
+      setBills((bls || []).filter(b => belongsToProfile(b, prof)));
+      setProfile(prof || {});
     } catch {
       toast('Failed to load data', 'error');
     }
@@ -124,10 +131,18 @@ export default function ReceiptVoucher() {
         } catch { /* fall back to peeked number */ }
       }
 
+      // v1.10.66 (#64 item 2) — a NEW receipt is stamped with the business
+      // selected now. An edited receipt keeps what it had, including no business
+      // at all: an older receipt is assigned only through the explicit "Assign
+      // to" banner, never as a side effect of fixing a typo while some other
+      // business happens to be selected.
+      const existing = editingId ? receipts.find(r => r.id === editingId) : null;
       const receipt = {
         ...form,
         receiptNo,
         amount: parseFloat(form.amount),
+        ownerGstin: existing ? (existing.ownerGstin || '') : (profile?.gstin || ''),
+        ownerName: existing ? (existing.ownerName || '') : (profile?.businessName || ''),
       };
       if (editingId) receipt.id = editingId;
       await saveReceipt(receipt);
@@ -248,6 +263,19 @@ export default function ReceiptVoucher() {
 
   const unpaidBills = bills.filter(b => b.status !== 'paid');
 
+  // v1.10.66 (#64 item 2) — receipts saved before this release carry no
+  // business. As with expenses they are never assigned automatically: only the
+  // user knows which business took the money.
+  const unassignedReceipts = receipts.filter(isUnassignedToBusiness);
+  const assignUnassignedReceipts = async () => {
+    await Promise.all(unassignedReceipts.map(r => saveReceipt({
+      ...r,
+      ownerGstin: profile?.gstin || '',
+      ownerName: profile?.businessName || '',
+    })));
+    loadData();
+  };
+
   return (
     <div className="dashboard-container">
       <div className="page-header">
@@ -257,6 +285,13 @@ export default function ReceiptVoucher() {
         </div>
         <button className="btn btn-primary" onClick={openAdd}><Plus size={18} /> New Receipt</button>
       </div>
+
+      <UnassignedBanner
+        count={unassignedReceipts.length}
+        businessName={profile?.businessName}
+        noun="receipt"
+        onAssign={assignUnassignedReceipts}
+      />
 
       {/* Add Modal */}
       {showForm && (
@@ -268,7 +303,15 @@ export default function ReceiptVoucher() {
             {unpaidBills.length > 0 && !form.againstInvoice && (
               <div style={{ marginBottom: '1rem' }}>
                 <label className="form-label">Quick Select — Unpaid Invoices</label>
-                <div className="client-picker" style={{ maxHeight: '150px' }}>
+                {/* v1.10.57 — reported (#44 item 2, @sangwanmail-eng):
+                    "payment receipt overlapped". This capped the height of
+                    `.client-picker`, which has no overflow handling — the
+                    class that scrolls is `.client-picker-list`. Ten unpaid
+                    invoices in a 150px box with nothing to clip them simply
+                    spilled out and painted over Receipt No / Date / Amount
+                    underneath. Adding overflow makes the cap actually mean
+                    something. */}
+                <div className="client-picker" style={{ maxHeight: '150px', overflowY: 'auto' }}>
                   {unpaidBills.slice(0, 10).map(bill => (
                     <button key={bill.id} className="client-picker-item" onClick={() => selectInvoice(bill)}>
                       <div>

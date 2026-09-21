@@ -430,6 +430,76 @@ body {
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.15) transparent;
 }
+
+/* v1.10.66 (#59) — phones get a hide/show menu. Below 768px the fixed 260px
+   sidebar took most of the screen and squeezed every page into a sliver, so it
+   now slides in from the left behind a menu button in a slim top bar and closes
+   again once a page is picked. The desktop layout is unchanged. */
+.mobile-topbar,
+.sidebar-backdrop { display: none; }
+@media (max-width: 768px) {
+  .mobile-topbar {
+    display: flex;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 52px;
+    /* Below .modal-overlay (1000): an open dialog must cover the menu button,
+       or picking a page from it would throw away what was typed. */
+    z-index: 900;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0 0.75rem;
+    background: #0f172a;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .mobile-topbar-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    cursor: pointer;
+  }
+  .mobile-topbar-title { font-weight: 700; font-size: 1rem; white-space: nowrap; }
+  .mobile-topbar-business {
+    margin-left: auto;
+    min-width: 0;
+    font-size: 0.8rem;
+    opacity: 0.8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 1200;
+    width: min(280px, 85vw);
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.35);
+  }
+  .sidebar.sidebar-open { transform: none; }
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1150;
+    background: rgba(15,23,42,0.55);
+  }
+  /* Two classes so this outranks the base .main-content padding further down. */
+  .app-layout > .main-content { padding: calc(52px + 1rem) 1rem 1.5rem; }
+  .pwa-install-banner { top: 52px; }
+}
 .sidebar::-webkit-scrollbar { width: 6px; }
 .sidebar::-webkit-scrollbar-thumb {
   background: rgba(255,255,255,0.15);
@@ -1013,12 +1083,31 @@ textarea.form-input { resize: vertical; min-height: 60px; }
   min-height: 0;
 }
 
+/* v1.10.65 — requested (#58 item 2, @sangwanmail-eng): "to access show
+   preview and hide preview button once you are at the bottom of the page,
+   you have to scroll all page."
+
+   Moving that one button was not the fix. The whole toolbar — Save, Save &
+   Download, Print, WhatsApp, E-Way Bill — sat at the top of a long form and
+   scrolled away, so ANY of those actions meant scrolling back up. Pinning
+   the bar fixes the complaint for all of them at once.
+
+   The background is opaque on purpose: the invoice rows scroll underneath,
+   and a translucent bar would let text show through the buttons. */
 .generator-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 1.5rem;
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+  padding: 0.6rem 0.25rem;
+  border-bottom: 1px solid var(--border);
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .split-view {
@@ -2123,20 +2212,25 @@ a:focus-visible {
 
 .inv-party-right { text-align: right; display: flex; flex-direction: column; justify-content: center; }
 
+/* v1.10.66 (#64 item 5) — fixed, print-safe colours instead of the app theme's.
+   The badge sits on the invoice paper, which is white in every theme, so the
+   theme greens and blues were the wrong source: the light theme's green reached
+   only 3.6:1 and faded on a black-and-white printer, and the dark theme's paler
+   shades were fainter still. Both now clear 4.5:1 on their tint. */
 .inv-tax-badge {
   display: inline-block;
   margin-top: 0.5rem;
   padding: 0.2rem 0.6rem;
-  background: var(--primary-light);
-  color: var(--primary);
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
   border-radius: 20px;
   font-size: 0.7rem;
   font-weight: 600;
 }
 
 .inv-tax-badge-green {
-  background: var(--success-light);
-  color: var(--success);
+  background: rgba(5, 150, 105, 0.08);
+  color: #047857;
 }
 
 /* Items Table */
@@ -2323,6 +2417,32 @@ a:focus-visible {
   line-height: 1.5;
   margin: 0;
 }
+
+/* v1.10.57 — reported (#44 item 1, @sangwanmail-eng): "Term and condition
+   not arrange properly". Numbered terms printed as one run-on paragraph.
+
+   Cause: the global reset at the top of this file — `* { margin: 0;
+   padding: 0 }` — strips spacing from EVERY element, <p>, <ul>, <ol> and
+   <li> included. Rich terms are user HTML, so once that spacing is gone
+   the paragraphs butt together and list markers lose their indent, and a
+   tidy numbered list arrives as a wall of text.
+
+   v1.10.37 added the rules that put it back — but only under
+   `.inv-terms-formatted`, and the default mode is `compact` (see
+   printSettings.js). So every invoice except a services one rendered the
+   flattened version.
+
+   These rules sit on the base `.inv-rich` class so structure survives in
+   BOTH modes; compact keeps tighter spacing, in line with its purpose of
+   fitting more on the page. The `.inv-terms-formatted` block below
+   overrides these with roomier values and still wins on specificity. */
+.inv-terms.inv-rich p { margin: 0 0 0.35rem; }
+.inv-terms.inv-rich p:last-child { margin-bottom: 0; }
+.inv-terms.inv-rich ol,
+.inv-terms.inv-rich ul { margin: 0.25rem 0 0.35rem; padding-left: 1.1rem; }
+.inv-terms.inv-rich li { margin-bottom: 0.2rem; }
+.inv-terms.inv-rich li:last-child { margin-bottom: 0; }
+.inv-terms.inv-rich br { line-height: 1.6; }
 
 /* v1.10.37 — "Formatted" mode overrides. Reported: current "compact"
    render was small + uppercase-inherited + hard to read on the PDF.

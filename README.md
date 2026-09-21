@@ -16,7 +16,7 @@
 
 Your data never leaves your computer. No cloud. No signup. No tracking. No limits. Open-source and offline-first.
 
-[⬇ Download ZIP](https://github.com/IamRamgarhia/Free-GST-Billing-Software/archive/refs/heads/main.zip) &nbsp;|&nbsp; [📦 Releases](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases) &nbsp;|&nbsp; [⚡ 3-Step Install](#quick-start--installation) &nbsp;|&nbsp; [☁ Run Online (Vercel / Supabase / Railway)](./docs/DEPLOY_ONLINE.md) &nbsp;|&nbsp; [🧾 First Invoice in 5 Minutes](#your-first-invoice-in-5-minutes) &nbsp;|&nbsp; [📸 Screenshots](#screenshots) &nbsp;|&nbsp; [🐛 Report Bug](https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues)
+[⬇ Download ZIP](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest) &nbsp;|&nbsp; [📦 Releases](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases) &nbsp;|&nbsp; [⚡ 3-Step Install](#quick-start--installation) &nbsp;|&nbsp; [☁ Run Online (Vercel / Supabase / Railway)](./docs/DEPLOY_ONLINE.md) &nbsp;|&nbsp; [🧾 First Invoice in 5 Minutes](#your-first-invoice-in-5-minutes) &nbsp;|&nbsp; [📸 Screenshots](#screenshots) &nbsp;|&nbsp; [🐛 Report Bug](https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues)
 
 </div>
 
@@ -98,7 +98,8 @@ You need: Windows 10/11 PC, ~50 MB free disk, your business name + bank details 
 
 ### Step 1 — Install (1 minute)
 
-1. Download the project as a ZIP from <https://github.com/IamRamgarhia/Free-GST-Billing-Software/archive/refs/heads/main.zip>
+1. Download `Free-GST-Billing-vX.Y.Z.zip` from the [latest release](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+   (Do **not** use the green *Code -> Download ZIP* button — that gives the source code without the built app.)
 2. Right-click the downloaded ZIP → **Extract All** → pick a folder you'll remember (e.g. `Documents\FreeGSTBill`)
 3. Open that folder → **double-click `Install FreeGSTBill.bat`**
 4. Let it run — it installs Node.js automatically if you don't have it, then sets everything up. Takes 1–2 minutes the first time
@@ -324,11 +325,11 @@ If we priced every 🆕 feature at the going rate on the paid alternatives:
 | **Payment Receipts & Vouchers** | Generate payment receipts linked to invoices with amount in words |
 | 🆕 **Auto-Print Payment Receipt** | Recording a payment auto-opens a printable receipt (business header, receipt number, invoice number, mode, amount in Indian words, running balance). Print via browser Print → Save as PDF |
 | 🆕 **Payment History CRUD** | Every payment has a stable id + Receipt (reprint) / Edit note / Delete actions. Deleting a payment recomputes totals + status automatically |
-| 🆕 **Notification Bell** | Overdue invoices, low stock, upcoming GST filings, and update banners all surface in a single click-out popover with badge count |
+| 🆕 **Notification Bell** | Overdue invoices, low stock, upcoming GST filings, and update banners all surface in a single click-out popover with badge count. **Mark all as read** clears it — and each section remembers exactly what was cleared, so a genuinely new overdue invoice brings the alert back on its own |
 | 🆕 **Ctrl+K Command Palette** | Spotlight-style search across invoices, clients, products, and every settings section. Select an invoice → opens for edit in one keystroke |
 | 🆕 **Setup Wizard** | 3-step first-run wizard with 6 business-type presets (Retail / Freelancer / Restaurant / Wholesale / Manufacturing / Service). Configures paper size, language, and defaults in 90 seconds |
 | **Purchase Bills** | Record purchase invoices for ITC tracking and expense management |
-| **Multi-Business Profiles** | Switch between multiple businesses with separate GSTIN, bank details, logo, signature |
+| **Multi-Business Profiles** | Run several businesses side by side, each with its own GSTIN, bank details, logo and signature — **and its own separate books**. Invoices, dashboard totals, expenses, purchases, payment receipts, recurring templates, reports, GST returns and Income Tax all follow whichever business is selected, so one company's figures never appear under another. Your client list stays shared |
 
 ### :bar_chart: Reports & Analytics
 
@@ -369,7 +370,7 @@ If we priced every 🆕 feature at the going rate on the paid alternatives:
 | **Modules Page** | Turn off entire feature groups you don't need (recurring invoices, expenses, purchases, GST returns, integrations) — sidebar shrinks to match |
 | **Custom Invoice Numbering** | Branded prefix, separator (/ - #), financial year toggle, starting number, digit padding |
 | **Terms & Conditions** | Rich-text editor (B/I/U, lists, headings, links) + 13 India business-type starter templates + reusable saved-template library |
-| **Multi-Business Profiles** | Separate profiles with different GSTIN, bank details, logo, signature, country, currency. Switcher in the header for one-click context change |
+| **Multi-Business Profiles** | Separate profiles with different GSTIN, bank details, logo, signature, country, currency. Switcher in the header for one-click context change — the dashboard and every report re-filter immediately, with no reload. Records saved before you began separating businesses stay visible under all of them and are never hidden; a one-click **Assign to ‹business›** prompt lets you attach them when you are ready |
 | **Dark Mode** | Full dark theme with automatic persistence and theme-aware utility classes everywhere |
 | **PWA Installable** | Install as a standalone desktop app via Chrome or Edge — opens instantly, no browser needed |
 | **In-App Searchable User Guide** | 17 sections, live search with highlighted matches, downloadable as a fully searchable text PDF |
@@ -386,7 +387,7 @@ If we priced every 🆕 feature at the going rate on the paid alternatives:
 
 ### Option 1: Windows One-Click Installer (recommended — no terminal, no commands)
 
-1. **Download the ZIP** → [click here](https://github.com/IamRamgarhia/Free-GST-Billing-Software/archive/refs/heads/main.zip) or grab the latest from [Releases](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases)
+1. **Download the ZIP** → [click here](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest) or grab the latest from [Releases](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases)
 2. **Extract** it anywhere (e.g. `Documents\FreeGSTBill`)
 3. **Double-click** `Install FreeGSTBill.bat`
 4. The app opens at **http://localhost:47371** — a **Desktop shortcut** and **Start-Menu entry** are created for you
@@ -530,7 +531,7 @@ The app includes a **step-by-step interactive filing guide** with screenshots an
 - [ ] **E-Invoicing (IRN)** — generate Invoice Reference Number via IRP portal *(mandatory for AATO > ₹5 cr — see [docs/COMPETITOR_GAPS.md](./docs/COMPETITOR_GAPS.md))*
 - [ ] **Bulk E-Invoicing** — generate IRN for multiple invoices at once
 - [ ] **Direct GSTR-1/3B portal upload** *(currently we generate the JSON, user uploads via offline tool — direct submission requires GSP partnership)*
-- [ ] **Reverse Charge Mechanism (RCM)** flag + self-invoice
+- [ ] **RCM self-invoice** for purchases from unregistered suppliers *(the reverse-charge switch, the "Reverse Charge: Yes / No" line on tax invoices and the GSTR-1 / GSTR-3B reporting already ship)*
 - [ ] **GST Cess** (compensation cess on tobacco/auto/coal)
 - [ ] **Composition scheme** invoice variant with Rule 46A declaration
 - [ ] **Automatic Payment Reminders** — email + WhatsApp for overdue invoices
@@ -722,7 +723,7 @@ Yes. Free GST Billing Software supports **22 countries** with locale-correct cur
 Yes. You can add unlimited business profiles (each with its own GSTIN, bank accounts, logo, signature, and country setting). Switch between them with one click in the header.
 
 ### Does it run on Mac or Linux?
-The `.bat` installers are Windows-only, but the app itself works on macOS and Linux via `npm install` + `npm start`. See the [Quick Start](#quick-start--installation) section.
+The `.bat` installers are Windows-only, but the app itself works on macOS and Linux — a NAS included — from the release ZIP (`Free GST Billing.sh`) or via `npm install` + `npm start`. See the [Quick Start](#quick-start--installation) section. From v1.10.66, **Control Panel → Update Now** also works on Linux / NAS installs made from the release ZIP (it needs `unzip` or python3); restart the app, or its container, afterwards.
 
 ### What happens to my data when the app updates?
 Updates only refresh the app code and dependencies. Your `data/` folder (invoices, clients, products, settings) and `Saved Invoices/` PDF archive are **never touched**. The updater also backs them up to `%TEMP%` as a third safety net before pulling new code.
@@ -754,7 +755,7 @@ This project is licensed under the [MIT License](LICENSE) — free to use, modif
 
 ### Ready to stop paying for billing software?
 
-[**⬇ Download Now**](https://github.com/IamRamgarhia/Free-GST-Billing-Software/archive/refs/heads/main.zip) &nbsp;·&nbsp; [⭐ **Star on GitHub**](https://github.com/IamRamgarhia/Free-GST-Billing-Software) &nbsp;·&nbsp; [📖 **Read the User Guide**](docs/USER_GUIDE.md) &nbsp;·&nbsp; [🐛 **Report an Issue**](https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues) &nbsp;·&nbsp; [📧 **Email DiceCodes**](mailto:Contact@dicecodes.com)
+[**⬇ Download Now**](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest) &nbsp;·&nbsp; [⭐ **Star on GitHub**](https://github.com/IamRamgarhia/Free-GST-Billing-Software) &nbsp;·&nbsp; [📖 **Read the User Guide**](docs/USER_GUIDE.md) &nbsp;·&nbsp; [🐛 **Report an Issue**](https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues) &nbsp;·&nbsp; [📧 **Email DiceCodes**](mailto:Contact@dicecodes.com)
 
 ---
 

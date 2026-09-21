@@ -374,6 +374,235 @@ precedence a browser applies — so it fails on the old markup.
 
 ---
 
+---
+
+## ERR-009 - The release ZIP shipped a server that could not start
+
+**Version:** broke in v1.10.44.1 - fixed in v1.10.63
+**Reported by:** @ANIM35H (#54)
+
+**Symptom**
+
+```
+  Starting server on port 47371...
+  Server did not respond in 15s. Check for errors in this window.
+```
+
+The launcher never showed the real error. Running the shipped `server.js`
+by hand gives it:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '_system/src/utils.js'
+  imported from '_system/server.js'
+```
+
+**Cause**
+
+`server.js` has imported `./src/utils.js` (for `computeInvoiceTotals`)
+since v1.10.31. Commit `4169fac` then removed `src/` from the ZIP to cut
+the download from 31.5 MB to 15.95 MB - correct for the React source,
+except the **server** had quietly grown a runtime dependency on one file
+inside it. The process exits before binding, so the launcher can only
+report a timeout.
+
+**Every release from v1.10.44.1 onward shipped a dead server.**
+
+**Rule**
+
+> Anything `server.js` imports must be in the ZIP. Slimming the package is
+> fine; slimming it without re-checking the server's import graph is not.
+
+**Guard:** `scripts/build-release-zip.mjs` -> `assertServerImportsResolve()`
+walks every relative import reachable from the packaged `server.js` and
+**fails the build** if a file is missing. Verified by removing the fix and
+confirming the build aborts.
+
+### The part worth remembering
+
+Fifteen releases went out broken while every check was green. The smoke
+suite, the lint run and the manual testing all exercised the **development
+tree**, where `src/` is always present. Nothing ever ran the artefact that
+users actually download.
+
+> **Testing the repo is not testing the release.** If a defect can exist
+> only in the packaged output, it can only be caught by opening the
+> package.
+
+It stayed hidden longer because the README pointed people at the *source*
+ZIP, which does contain `src/` - so the users who complained loudest about
+other things had working servers, and the only broken path was the one
+almost nobody took. Correcting the README in v1.10.61 pointed everyone at
+the release ZIP, which would have made this far more visible.
+
+
+### Two further faults found the moment the gate was built
+
+Running the suite against a genuinely fresh install exposed defects the
+tests themselves had been hiding:
+
+1. **The first-run wizard had never been exercised.** A fresh install shows
+   two screens in sequence whose buttons are capitalised differently -
+   `Skip Setup` then `Skip setup`. The suite matched `/^Skip setup$/`, which
+   never matched the first one. In the dev tree onboarding is already
+   complete, so no wizard appears and the mismatch was invisible.
+
+2. **The "is anything in the way?" check was wrong.** It used
+   `offsetParent !== null`, which is **always null for a `position: fixed`
+   element** - and `.modal-overlay` is fixed. So it reported a clear screen
+   while a full-page wizard sat on top, and every later click timed out
+   against an intercepted element.
+
+Both are the same mistake as ERR-009 wearing a different hat: the primed
+development environment is not the one users get.
+
+**Verify by hand after any packaging change:**
+
+```powershell
+Expand-Archive Free-GST-Billing-vX.Y.Z.zip -DestinationPath t
+cd t\Free-GST-Billing\_system
+npm install --omit=dev
+node server.js        # must print "running at http://localhost:PORT"
+```
+
+---
+
+## ERR-010 - Scoping one record type per business left every other total mixed
+
+**Version:** incomplete in v1.10.64 / v1.10.65 · fixed in v1.10.66
+**Reported by:** @sangwanmail-eng (#64)
+
+**Symptom** - *"still payment receipt and reports show all companies data"*;
+*"Why total invoiced, tax collected, outstanding and invoices show all companies
+data?"*; *"expenses, reports, receipts, purchases and recurring not refresh when
+company switch"*. Screenshots: dashboard header "0 invoices" beside a card
+reading "Invoices 1 / ₹187.62"; Reports "Revenue ₹0.00, Expenses ₹560.00".
+
+**Cause** - v1.10.64 filtered *invoices* by business, but each screen loads
+several collections. GST Returns, Reports and Income Tax passed expenses and
+purchases through unfiltered, so GSTR-3B input tax credit mixed GSTINs. The
+dashboard summed its cards from the raw server response before filtering.
+Receipts were never scoped. And seven screens read the business once on mount,
+so after a switch they showed the old company and stamped new records with it.
+
+**Rule** - when a record type becomes per-business, check **every** `getAll*()`
+call site, not just the list screen. Derive totals from the filtered list, never
+from the raw response. A screen that reads the active business must re-read it
+when the business changes - App keys those screens on `businessKey`.
+
+**Guard** - `tests/smoke.mjs` (#64 checks): dashboard, Reports and GSTR-3B ITC
+values must **not** move when another company's invoice / expense / purchase is
+added, and **must** move when this company's is, so a dead card cannot pass.
+Switching company must refresh an open Expenses screen and stamp a new expense
+with the new business; another company's receipts must be hidden.
+
+---
+
+## ERR-011 - The invoice re-decided what the tax engine had already decided
+
+**Version:** fixed in v1.10.66
+**Reported by:** @Yashparmar1125 (#61)
+
+**Symptom** - *"the itemized `IGST (18%)` line displays as `₹0.00`"* while the
+grand total is correct.
+
+**Cause** - `computeInvoiceTotals` decides interstate from GST state **codes**
+(place of supply, client GSTIN). `InvoicePreview` and GST Returns'
+`billIsInterstate` each decided it again from state **names**. They disagreed for
+a client from another state supplied in the seller's state, so the invoice
+printed an IGST row holding `totals.igst = 0`. Separately the engine treated a
+client abroad as intrastate, because a foreign state has no GST code.
+
+**Rule** - whatever *displays or reports* tax uses the flags the engine returned
+with the amounts (`totals.isInterstate`), never a parallel calculation. Place of
+supply follows the client's country and state - never the currency, which is
+what PR #60 got wrong.
+
+Changing a tax decision moves it everywhere it is reported: exports then had to
+leave GSTR-1 B2B / B2C (an inter-state row with the home state as place of
+supply is rejected) and enter GSTR-3B 3.1(b), and the invoice form's totals
+`useMemo` had to list `client.country`, or switching only the country kept the
+old split on screen and Save stored it.
+
+**Guard** - `scripts/tax-test.mjs` `[V66-#61]` (place of supply governs, GSTIN
+only, export, same-state USD); smoke: a Delhi client supplied in Punjab must
+print CGST / SGST and no IGST row.
+
+---
+
+## ERR-012 - A print fix that only reached the PDF path
+
+**Version:** fixed in v1.10.66
+**Reported by:** @sangwanmail-eng (#64, photo of a printed proforma)
+
+**Symptom** - *"Some text not visible in black and white print."* The photo shows
+"This is not a tax invoice. For estimation purposes only." almost invisible.
+
+**Cause** - the text was inline `#94a3b8`, a 2.6:1 contrast. The `.printing-mode`
+CSS darkens such colours, but only the html2canvas PDF path adds that class; the
+**Print** button prints an iframe that never gets it.
+
+**Rule** - fix colours at the source so screen, Print and PDF are all legible.
+Invoice text must reach 4.5:1 against its background. Never rely on a mode class
+that only one output path applies.
+
+**Guard** - smoke: every text element of a proforma preview must reach 4.5:1.
+
+---
+
+## ERR-013 - CSV exports wrote formula-like text raw
+
+**Version:** fixed in v1.10.66
+**Reported by:** @Yashparmar1125 (#63)
+
+**Symptom** - a cell such as `=HYPERLINK("http://…","Invoice")` in an exported CSV
+runs as a formula in Excel or Google Sheets.
+
+**Cause** - three local `escape` helpers quoted commas and quotes only - two of
+them not even line breaks.
+
+**Rule** - every CSV cell goes through `toCsvCell` / `toCsvLine` in
+`src/utils.js`. No local escape functions.
+
+**Guard** - `scripts/csv-test.mjs`, part of `npm run test:unit`.
+
+---
+
+## ERR-014 - The ZIP only unpacked cleanly on Windows, and Linux had no updater
+
+**Version:** every Windows-built release up to v1.10.65 · fixed in v1.10.66
+**Reported by:** @deppen12 (#59)
+
+**Symptom** - *"it's very difficult to install on nas"*; *"now today you roll out
+new update now my works start again coz update for button not works."*
+
+**Cause** - Windows PowerShell 5.1's `Compress-Archive` writes `\` as the path
+separator (73 entries in v1.10.65). The ZIP format allows only `/`, so Linux,
+macOS and BusyBox unzip either warn or create single files named
+`Free-GST-Billing\_system\server.js`. And the Control Panel's Update looked for
+`update-unix.sh`, which never existed, so it always answered "Script not found
+for this platform".
+
+**Rule** - build ZIPs with `tar.exe -a` (or `zip`), never `Compress-Archive`.
+Every Control Panel action offered on Unix needs a Unix script, written for
+POSIX `sh` - NAS images have no bash. Test Unix scripts in a real Linux
+container, not by reading them.
+
+Two traps found while testing the fix, not by reading it: BusyBox `unzip` exits
+with status 1 for real errors (full disk, damaged file) as well as for the
+warnings Info-ZIP uses 1 for, so the updater requires status 0 and then checks
+every extracted file's size against the ZIP's own directory. And choosing `sh`
+for *every* Unix script broke `backup-unix.sh`, which needs bash - only the
+updater runs under `sh`.
+
+**Guard** - `scripts/build-release-zip.mjs` reads the finished archive back and
+fails on any `\` path or on a `.sh` with CRLF endings. `npm run test:update-unix`
+runs the updater in Alpine (BusyBox, no bash) and Debian slim (dash): a real
+update, a re-run, rollback after a failed `npm install`, a truncated download,
+no downgrade over a newer install, a git checkout, a system with no unzip, and a
+full update under dash.
+
+---
+
 <!--
 Adding an entry? Copy this skeleton.
 

@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { ShoppingCart, Plus, Edit3, Trash2, Search, X, Save, Download, Wand2, FileText, Eye } from 'lucide-react';
 import HelpButton from './HelpButton';
-import { getAllPurchases, savePurchase, deletePurchase, getAllProducts, saveProduct } from '../store';
-import { formatCurrency, calculateRoundOff, getFYOptions } from '../utils';
+import { getAllPurchases, savePurchase, deletePurchase, getAllProducts, saveProduct, getProfile } from '../store';
+import { formatCurrency, calculateRoundOff, getFYOptions, belongsToProfile, isUnassignedToBusiness, toCsvLine } from '../utils';
+import UnassignedBanner from './UnassignedBanner';
 import { getPrintSettings } from '../utils/printSettings';
 import { toast } from './Toast';
 import { confirmAction, promptAction } from './ConfirmModal';
@@ -77,6 +78,8 @@ function calcPurchaseTotal(items, applyRoundOff = false) {
 
 export default function PurchaseBills() {
   const [purchases, setPurchases] = useState([]);
+  // v1.10.65 (#58 item 3) — the business these records belong to.
+  const [ownerProfile, setOwnerProfile] = useState(null);
   // v1.10.54 (#42) — the Products & Services master, used to seed item
   // suggestions. Loaded on mount alongside purchases.
   const [products, setProducts] = useState([]);
@@ -136,9 +139,28 @@ export default function PurchaseBills() {
 
   const fyOptions = getFYOptions();
 
+
+  // v1.10.65 (#58 item 3) — assign records saved before businesses were kept
+  // separate. Never automatic: only the user knows which business an old
+  // record belonged to, so guessing would file it into the wrong books.
+  const unassignedPurchases = purchases.filter(isUnassignedToBusiness);
+  const assignUnassignedPurchases = async () => {
+    await Promise.all(unassignedPurchases.map(r => savePurchase({
+      ...r,
+      ownerGstin: ownerProfile?.gstin || '',
+      ownerName: ownerProfile?.businessName || '',
+    })));
+    loadPurchases();
+  };
+
   const loadPurchases = async () => {
     try {
-      setPurchases(await getAllPurchases());
+      const [rows, prof] = await Promise.all([getAllPurchases(), getProfile().catch(() => null)]);
+      setOwnerProfile(prof);
+      // v1.10.65 (#58 item 3) — show only this business's records. Anything
+      // saved before businesses were separated has no owner recorded and is
+      // always shown, so nothing disappears from an existing ledger.
+      setPurchases((rows || []).filter(r => belongsToProfile(r, prof)));
     } catch {
       toast('Failed to load purchases', 'error');
     }
@@ -328,6 +350,18 @@ export default function PurchaseBills() {
   const handleSave = async () => {
     if (!form.supplierName.trim()) { toast('Supplier name is required', 'warning'); return; }
     if (!form.invoiceNumber.trim()) { toast('Invoice number is required', 'warning'); return; }
+    // v1.10.58 — reported (#47 item 2, @sangwanmail-eng): "Purchase also
+    // save without adding any product." Supplier and invoice number were
+    // checked, but nothing verified the bill had any line items, so an
+    // empty bill saved with a zero total.
+    //
+    // That is not merely untidy: a purchase bill is the ITC record. A zero
+    // bill sits in GSTR-3B reconciliation as a vendor invoice claiming
+    // nothing, and the empty rows also feed the stock/product sync on save.
+    if (!form.items.some(i => (i.name || '').trim() && (parseFloat(i.quantity) || 0) * (parseFloat(i.rate) || 0) > 0)) {
+      toast('Add at least one item with a quantity and rate', 'warning');
+      return;
+    }
     try {
       const totals = calcPurchaseTotal(form.items, form.applyRoundOff);
       const purchase = {
@@ -337,6 +371,10 @@ export default function PurchaseBills() {
         supplierAddress: (form.supplierAddress || '').trim(),
         supplierGstin: form.supplierGstin.trim(),
         invoiceNumber: form.invoiceNumber.trim(),
+        // Which of YOUR businesses bought this. Distinct from supplierGstin
+        // directly above, which is who sold it.
+        ownerGstin: ownerProfile?.gstin || '',
+        ownerName: ownerProfile?.businessName || '',
         items: form.items.map(i => ({
           name: (i.name || '').trim(),
           hsn: (i.hsn || '').trim(),
@@ -586,12 +624,18 @@ export default function PurchaseBills() {
     setForm(prev => {
       const next = { ...prev, supplierName: value };
       if (match) {
-        if (!(prev.supplierGstin || '').trim()) next.supplierGstin = match.gstin;
-        if (!(prev.supplierAddress || '').trim()) next.supplierAddress = match.address;
+        // v1.10.55 (#43) — same re-selection bug as the item rows, and worse
+        // here: switching supplier used to leave the PREVIOUS supplier's
+        // GSTIN in place, so the bill was filed against the wrong taxpayer
+        // and ITC reconciliation broke. See isOursToReplace above.
+        const last = prev._autoSupplier || {};
+        if (isOursToReplace(prev.supplierGstin, last.gstin)) next.supplierGstin = match.gstin;
+        if (isOursToReplace(prev.supplierAddress, last.address)) next.supplierAddress = match.address;
         // Interstate drives CGST+SGST vs IGST, so recall it too — it is a
         // property of where the supplier is, and getting it wrong routes
         // ITC to the wrong GSTR-3B column.
         next.interstate = match.interstate;
+        next._autoSupplier = { gstin: match.gstin, address: match.address };
       }
       return next;
     });
@@ -600,16 +644,50 @@ export default function PurchaseBills() {
   // Same idea for line items: recall HSN, rate and tax rates from the last
   // time this item was purchased. Rate is filled only when still 0 so a
   // price change the user has already typed is never clobbered.
+  // v1.10.55 — reported (#43, @sangwanmail-eng): "when we select item all
+  // details fetch ok. But when we change item in same field details not
+  // change."
+  //
+  // v1.10.50 filled a field only when it was BLANK, to avoid overwriting
+  // something the user had typed. That protected typed input but broke
+  // re-selection: pick "Pen drive" (HSN fills to `s`), then change the same
+  // row to "Mouse" — HSN is no longer blank, so it stayed on Pen drive's
+  // value. The bill then carried the wrong HSN and the wrong rate, silently.
+  //
+  // The flaw was treating "field is non-empty" as "user typed this". We now
+  // record what WE auto-filled on the row (`_auto`, transient — the save
+  // path whitelists fields, so it never persists). A field is ours to
+  // replace when it is empty or still holds exactly what we last put there;
+  // once the user edits it, it stops matching and we leave it alone.
+  //
+  // So: re-selecting updates the details, and a hand-typed correction still
+  // survives — both, rather than one at the cost of the other.
+  const isOursToReplace = (current, lastAuto) => {
+    const cur = current === undefined || current === null ? '' : String(current).trim();
+    if (cur === '' || cur === '0') return true;              // never filled, or still zero
+    if (lastAuto === undefined || lastAuto === null) return false;
+    return cur === String(lastAuto).trim();                  // untouched since we filled it
+  };
+
   const updateItemName = (index, value) => {
     const match = itemHistory.find(i => i.name.toLowerCase() === value.trim().toLowerCase());
     setForm(prev => {
       const items = [...prev.items];
       const cur = { ...items[index], name: value };
       if (match) {
-        if (!(cur.hsn || '').trim()) cur.hsn = match.hsn;
-        if (!Number(cur.rate)) cur.rate = match.rate;
-        if (match.taxPercent) cur.taxPercent = match.taxPercent;
-        if (match.cessPercent) cur.cessPercent = match.cessPercent;
+        const last = cur._auto || {};
+        if (isOursToReplace(cur.hsn, last.hsn)) cur.hsn = match.hsn;
+        if (isOursToReplace(cur.rate, last.rate)) cur.rate = match.rate;
+        if (isOursToReplace(cur.taxPercent, last.taxPercent)) cur.taxPercent = match.taxPercent;
+        if (isOursToReplace(cur.cessPercent, last.cessPercent)) cur.cessPercent = match.cessPercent;
+        // Remember exactly what we just wrote, so the next re-selection can
+        // tell our values apart from the user's.
+        cur._auto = {
+          hsn: match.hsn,
+          rate: match.rate,
+          taxPercent: match.taxPercent,
+          cessPercent: match.cessPercent,
+        };
       }
       items[index] = cur;
       return { ...prev, items };
@@ -644,11 +722,12 @@ export default function PurchaseBills() {
   const exportCSV = () => {
     if (filtered.length === 0) { toast('No purchases to export', 'warning'); return; }
     const headers = ['Date', 'Supplier', 'GSTIN', 'Invoice No', 'Taxable Amount', 'Tax', 'Round-off', 'Total', 'Status', 'Note'];
-    const escape = (v) => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    const lines = [headers.map(escape).join(',')];
+    // v1.10.66 (#63) — toCsvLine neutralises formula-like text and quotes
+    // line breaks, which the old local escape let split a row in two.
+    const lines = [toCsvLine(headers)];
     filtered.forEach(p => {
       const t = calcPurchaseTotal(p.items, !!p.applyRoundOff);
-      lines.push([p.date, p.supplierName, p.supplierGstin, p.invoiceNumber, t.taxable.toFixed(2), t.tax.toFixed(2), t.roundOff.toFixed(2), t.finalTotal.toFixed(2), p.paymentStatus, p.note].map(escape).join(','));
+      lines.push(toCsvLine([p.date, p.supplierName, p.supplierGstin, p.invoiceNumber, t.taxable.toFixed(2), t.tax.toFixed(2), t.roundOff.toFixed(2), t.finalTotal.toFixed(2), p.paymentStatus, p.note]));
     });
     const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -776,6 +855,13 @@ export default function PurchaseBills() {
       })()}
 
       {/* Stats */}
+      <UnassignedBanner
+        count={unassignedPurchases.length}
+        businessName={ownerProfile?.businessName}
+        noun="purchase bill"
+        onAssign={assignUnassignedPurchases}
+      />
+
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
         <div className="stat-card">
           <div className="stat-icon stat-icon-purple"><ShoppingCart size={22} /></div>

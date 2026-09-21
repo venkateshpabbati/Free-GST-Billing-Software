@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, Wallet, BarChart3, Clock, Search, X, Users, Package } from 'lucide-react';
-import { getAllBills, getAllExpenses } from '../store';
-import { formatCurrency, getFYOptions } from '../utils';
+import { getAllBills, getAllExpenses, getProfile } from '../store';
+import { formatCurrency, getFYOptions, belongsToProfile } from '../utils';
 import { toast } from './Toast';
 
 const MONTHS = [
@@ -31,9 +31,15 @@ export default function ReportsView() {
 
   const loadData = async () => {
     try {
-      const [billData, expData] = await Promise.all([getAllBills(), getAllExpenses()]);
-      setBills(billData);
-      setExpenses(expData);
+      const [billData, expData, prof] = await Promise.all([
+        getAllBills(), getAllExpenses(), getProfile().catch(() => null),
+      ]);
+      // v1.10.64 (#55) — reports are per business. Mixing two companies'
+      // turnover into one profit figure is simply a wrong number.
+      setBills((billData || []).filter(b => belongsToProfile(b, prof)));
+      // v1.10.66 (#64) — expenses too. Filtering only the invoices left every
+      // company's expenses in each company's profit and loss.
+      setExpenses((expData || []).filter(e => belongsToProfile(e, prof)));
     } catch {
       toast('Failed to load data', 'error');
     }

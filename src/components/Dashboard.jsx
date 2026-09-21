@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, TrendingUp, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, StickyNote, Send, Package, Download, Printer } from 'lucide-react';
 import HelpButton from './HelpButton';
 import { getAllBills, deleteBill, saveBill, getAllProducts, saveProduct, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts } from '../store';
-import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords } from '../utils';
+import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords, belongsToProfile } from '../utils';
 import { openWhatsAppShare } from '../utils/share';
 import PageHeader from './PageHeader';
 import { toast } from './Toast';
@@ -143,10 +143,55 @@ function ReceiptModal({ target, onClose }) {
   );
 }
 
-export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
-  const [bills, setBills] = useState([]);
+export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpenProducts, activeProfile }) {
+  // v1.10.64 — requested (#55, @sangwanmail-eng): "An invoice belonging to one
+  // company should not appear under the other."
+  //
+  // Bills and the active business load independently, so filtering at load
+  // time would race — whichever arrived second would be ignored. Instead the
+  // raw list is held and the visible list derived, which stays correct when
+  // either changes, including when the user switches business from the
+  // header without a reload.
+  //
+  // Anything that cannot be attributed to a business is SHOWN, never hidden.
+  // See belongsToProfile() in utils.js for why that matters here.
+  const [allBills, setBills] = useState([]);
+  const [profileState, setProfileState] = useState(null);
+
+  // v1.10.65 — requested (#58 item 1, @sangwanmail-eng): "Dashboard should
+  // refresh automatically after company switch."
+  //
+  // It did not, because the dashboard fetched the business ONCE when it
+  // mounted. Switching business from the header updated the app, but this
+  // screen never heard about it and kept showing the previous company's
+  // invoices until a manual reload.
+  //
+  // The live value is now passed in as a prop, so a switch re-filters
+  // immediately. The locally fetched copy stays as a fallback for the first
+  // paint, before the prop has arrived.
+  const profile = activeProfile ?? profileState;
+
+  const bills = useMemo(
+    () => allBills.filter(b => belongsToProfile(b, profile)),
+    [allBills, profile],
+  );
   const [filtered, setFiltered] = useState([]);
-  const [stats, setStats] = useState({ byCurrency: {}, count: 0 });
+  // v1.10.66 (#64 item 3) — the headline cards are computed from `bills`, the
+  // list already narrowed to the active business. They used to be summed in
+  // loadBills() from the raw server response, so Total Invoiced, Tax Collected,
+  // Outstanding and the invoice count added up EVERY company's invoices while
+  // the table underneath showed only one.
+  const stats = useMemo(() => {
+    const byCurrency = {};
+    for (const b of bills) {
+      const cur = b.currency || b.data?.invoiceOptions?.currency || 'INR';
+      if (!byCurrency[cur]) byCurrency[cur] = { total: 0, tax: 0, unpaid: 0 };
+      byCurrency[cur].total += b.totalAmount || 0;
+      byCurrency[cur].tax += b.totalTaxAmount || 0;
+      if (b.status !== 'paid') byCurrency[cur].unpaid += (b.totalAmount || 0) - (b.paidAmount || 0);
+    }
+    return { byCurrency, count: bills.length };
+  }, [bills]);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -185,7 +230,6 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
   const [editPaymentModal, setEditPaymentModal] = useState(null);
   const [paymentInput, setPaymentInput] = useState({ amount: '', date: '', mode: 'bank-transfer', note: '' });
   const [showRemindAll, setShowRemindAll] = useState(false);
-  const [profile, setProfileState] = useState(null);
   const [clients, setClients] = useState([]);
   const [lowStockProducts, setLowStockProducts] = useState([]);
 
@@ -228,7 +272,14 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
         }
         const reconcileWrites = [];
         for (const bill of data) {
-          const rcpts = receiptsByBillKey.get(bill.id) || receiptsByBillKey.get(bill.invoiceNumber) || [];
+          // v1.10.66 (#64) — only a receipt from the business that raised the
+          // invoice may repair it. Two businesses can share an invoice number,
+          // and matching on the number alone posted one company's payment onto
+          // the other company's invoice every time the Dashboard opened.
+          // Receipts saved before businesses were separated carry no business
+          // and still match, as before.
+          const rcpts = (receiptsByBillKey.get(bill.id) || receiptsByBillKey.get(bill.invoiceNumber) || [])
+            .filter(r => belongsToProfile(bill, { gstin: r.ownerGstin, businessName: r.ownerName }));
           if (!rcpts.length) continue;
           const currentPayments = Array.isArray(bill.payments) ? bill.payments : [];
           const missing = rcpts.filter(r => {
@@ -285,18 +336,8 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
         await Promise.allSettled(updates);
       }
 
+      // Headline totals are derived from the business-filtered list (`stats`).
       setBills(data);
-
-      // Group totals by currency
-      const byCurrency = {};
-      for (const b of data) {
-        const cur = b.currency || b.data?.invoiceOptions?.currency || 'INR';
-        if (!byCurrency[cur]) byCurrency[cur] = { total: 0, tax: 0, unpaid: 0 };
-        byCurrency[cur].total += b.totalAmount || 0;
-        byCurrency[cur].tax += b.totalTaxAmount || 0;
-        if (b.status !== 'paid') byCurrency[cur].unpaid += (b.totalAmount || 0) - (b.paidAmount || 0);
-      }
-      setStats({ byCurrency, count: data.length });
     } catch {
       toast('Failed to load invoices', 'error');
     }
@@ -1137,19 +1178,33 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
             </h3>
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+            {/* v1.10.57 — reported (#44 item 3, @sangwanmail-eng): "Low stock
+                notification message should clickable to open direct product
+                tab". These were plain <div>s, so seeing the alert meant
+                finding Products in the sidebar yourself. Now each chip is a
+                real <button> that opens Products — matching the notification
+                bell, which already navigated there. */}
             {lowStockProducts.map(p => (
-              <div key={p.id} style={{
-                padding: '0.4rem 0.75rem', borderRadius: 6, fontSize: '0.8rem',
-                background: (p.stock ?? 0) <= 0 ? '#fef2f2' : '#fffbeb',
-                border: `1px solid ${(p.stock ?? 0) <= 0 ? '#fecaca' : '#fde68a'}`,
-                color: (p.stock ?? 0) <= 0 ? '#dc2626' : '#d97706',
-              }}>
+              <button
+                key={p.id}
+                type="button"
+                onClick={onOpenProducts}
+                title={onOpenProducts ? `Open Products to restock ${p.name}` : undefined}
+                style={{
+                  padding: '0.4rem 0.75rem', borderRadius: 6, fontSize: '0.8rem',
+                  background: (p.stock ?? 0) <= 0 ? '#fef2f2' : '#fffbeb',
+                  border: `1px solid ${(p.stock ?? 0) <= 0 ? '#fecaca' : '#fde68a'}`,
+                  color: (p.stock ?? 0) <= 0 ? '#dc2626' : '#d97706',
+                  cursor: onOpenProducts ? 'pointer' : 'default',
+                  font: 'inherit',
+                  textAlign: 'left',
+                }}>
                 <strong>{p.name}</strong>
                 {p.hsn ? <span className="text-muted" style={{ marginLeft: 4, fontSize: '0.72rem' }}>({p.hsn})</span> : null}
                 <span style={{ marginLeft: 6, fontWeight: 700 }}>
                   {(p.stock ?? 0) <= 0 ? 'Out of Stock' : `Stock: ${p.stock}`}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
         </div>

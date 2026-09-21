@@ -45,6 +45,63 @@ export default function SettingsView({ onSaved }) {
   // IntersectionObserver — a single observer watching all 11 sections;
   // fires when any crosses the top-of-viewport band.
   const [activeSection, setActiveSection] = useState(JUMP_NAV_SECTIONS[0][0]);
+
+  // v1.10.55 — reported (#43, @sangwanmail-eng): "Some time details not save
+  // after update in setting tab", and the title said there was no save button
+  // at all.
+  //
+  // There is one, but the Company form runs ~450 lines of UI and its only
+  // Save button sits at the very bottom. Edit your GSTIN near the top, scroll
+  // on to another section, and nothing on screen tells you the change is
+  // still unsaved — leave the page and it is gone.
+  //
+  // It reads as "sometimes" because this page mixes three persistence models
+  // with no visible difference between them: Features toggles save silently
+  // on click, Region saves on click and shows a toast, while Company, Invoice
+  // Numbers and Terms each need their own button. Some edits stick, some
+  // vanish, and the UI gives the user no way to predict which.
+  //
+  // Fix: track whether the profile differs from what was last persisted and
+  // surface a sticky bar while it does, so the save is reachable from
+  // anywhere on the page and unsaved work is never silent.
+  const savedProfileRef = useRef(null);
+  const [profileDirty, setProfileDirty] = useState(false);
+
+  // v1.10.56 — reported (#44, @sangwanmail-eng): "Firm profile setting not
+  // saved. every time show popup".
+  //
+  // The profile was in fact saving fine. The v1.10.55 unsaved-changes
+  // tracker was wrong: it recorded the on-disk baseline in handleSave only,
+  // but the profile is persisted from THREE places —
+  //   1. handleSave              (the Save Profile button)
+  //   2. updateAccounts          (payment accounts auto-persist, v1.10.16)
+  //   3. handleLoadProfile       (switching business profile)
+  // After 2 or 3, the data was on disk but the baseline still held the older
+  // copy, so the bar insisted there were unsaved changes forever — and the
+  // beforeunload guard then threw a browser confirm dialog on every close.
+  // That popup is what the user was seeing.
+  //
+  // Fix: one helper, called from every path that persists, so the baseline
+  // can never drift from what is actually stored.
+  const markProfileSaved = (p) => {
+    savedProfileRef.current = JSON.stringify(p);
+    setProfileDirty(false);
+  };
+
+  // Recompute against the persisted baseline whenever the form changes.
+  // Compared by value, not by "did an onChange fire", so typing a character
+  // and deleting it again correctly leaves you clean.
+  useEffect(() => {
+    if (savedProfileRef.current === null) return; // profile not loaded yet
+    setProfileDirty(JSON.stringify(profile) !== savedProfileRef.current);
+  }, [profile]);
+
+  // v1.10.56 — the beforeunload confirm added in v1.10.55 is GONE.
+  // Even with the baseline bug fixed it was the wrong tool: it hijacks the
+  // browser's own close dialog for a form the user may have no intention of
+  // saving, and any future drift in the dirty check turns straight into a
+  // popup on every exit. The sticky bar already makes unsaved work visible
+  // without interrupting anyone.
   useEffect(() => {
     const els = JUMP_NAV_SECTIONS
       .map(([id]) => document.getElementById(id))
@@ -109,7 +166,11 @@ export default function SettingsView({ onSaved }) {
   };
 
   useEffect(() => {
-    getProfile().then(setProfile);
+    getProfile().then((p) => {
+      setProfile(p);
+      // Baseline for the unsaved-changes check — what is currently on disk.
+      savedProfileRef.current = JSON.stringify(p);
+    });
     loadTemplates();
     loadBusinessProfiles();
     setDriveConnected(isConnected());
@@ -161,7 +222,11 @@ export default function SettingsView({ onSaved }) {
       // active) auto-persists to the server without needing the main Save
       // button. Fire-and-forget — the same handler that awaits saveProfile
       // in handleSave already exists for the "save everything" path.
-      saveProfile(next).catch(() => { /* non-fatal — user can retry via Save */ });
+      // v1.10.56 (#44) — refresh the baseline on success, or the bar would
+      // keep claiming unsaved changes for something already on disk.
+      saveProfile(next)
+        .then(() => markProfileSaved(next))
+        .catch(() => { /* non-fatal — user can retry via Save */ });
       return next;
     });
   };
@@ -370,6 +435,9 @@ export default function SettingsView({ onSaved }) {
         } catch { /* localStorage full or blocked — skip */ }
       }
       if (onSaved) onSaved(profile);
+      // v1.10.55 (#43) — mark this state as the persisted baseline so the
+      // unsaved-changes bar disappears.
+      markProfileSaved(profile);
       toast('Profile saved!', 'success');
     } catch { toast('Failed to save profile', 'error'); }
     finally { setSaving(false); }
@@ -579,6 +647,9 @@ export default function SettingsView({ onSaved }) {
     delete loaded.id;
     setProfile(loaded);
     await saveProfile(loaded);
+    // v1.10.56 (#44) — switching profiles persists immediately, so this IS
+    // the saved state now.
+    markProfileSaved(loaded);
     if (onSaved) onSaved(loaded);
     toast(`Switched to ${bp.businessName}`, 'success');
   };
@@ -615,6 +686,56 @@ export default function SettingsView({ onSaved }) {
 
   return (
     <div className="settings-container">
+      {/* v1.10.55 (#43) — Unsaved-changes bar for the Company form.
+           Sticks to the top of the page so the Save is reachable from any
+           section, instead of only from the bottom of a 450-line form the
+           user has already scrolled past. Rendered only while there are
+           real changes, so it never nags. */}
+      {profileDirty && (
+        <div style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 30,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '1rem',
+          flexWrap: 'wrap',
+          padding: '0.7rem 1rem',
+          marginBottom: '0.9rem',
+          borderRadius: 10,
+          border: '1px solid #f59e0b',
+          background: 'rgba(245, 158, 11, 0.12)',
+          backdropFilter: 'blur(6px)',
+        }}>
+          <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text)' }}>
+            You have unsaved changes in <strong>Company Details</strong>.
+          </span>
+          <span style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                // Revert to what is actually on disk.
+                if (savedProfileRef.current) setProfile(JSON.parse(savedProfileRef.current));
+              }}
+              style={{ fontSize: '0.85rem' }}
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={saving}
+              onClick={() => companyFormRef.current?.requestSubmit()}
+              style={{ fontSize: '0.85rem' }}
+            >
+              <Save size={16} /> {saving ? 'Saving…' : 'Save Profile'}
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* v1.10.36 — Header lifted with a soft primary-accent gradient
            card, gear glyph in a rounded badge for visual identity, and
            a subtle count chip showing how many sections there are so
