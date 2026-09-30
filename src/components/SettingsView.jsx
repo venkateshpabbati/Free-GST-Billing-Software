@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getProfile, saveProfile, exportAllData, importData, inspectBackup, getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile, deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getRegionMode, setRegionMode, getEnabledModules, setEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
 import { ensureToken, findOrCreateFolder, uploadJSON } from '../services/googleDrive';
-import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFromBrowser, getCountriesForRegion, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId } from '../utils';
+import { getCountryConfig, getStatesForCountry, validateTaxId, getCountriesForRegion, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId, getFinancialYearLabel } from '../utils';
 // v1.10.36 — lucide's `Image` icon was imported as `Image`, which
 // SHADOWED the browser's `HTMLImageElement` constructor. Reported:
 // "Uncaught TypeError: et is not a constructor at onChange" on logo
@@ -15,7 +15,7 @@ import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 import PrintSettings from './PrintSettings';
 import HelpButton from './HelpButton';
-import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedBills, restoreTrashedBill, purgeTrashedBill } from '../store';
+import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedBills, restoreTrashedBill, purgeTrashedBill, runUpdateNow } from '../store';
 
 // v1.10.36 — Section order for the jump-nav pill bar. Keeping this at
 // module scope so the scroll-spy effect below can reference it without
@@ -38,7 +38,7 @@ export default function SettingsView({ onSaved }) {
   const [profile, setProfile] = useState({
     businessName: '', address: '', state: '', gstin: '', pan: '',
     email: '', phone: '', bankName: '', accountNumber: '', ifsc: '',
-    logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
+    logo: '', logoHeight: 48, signature: '', signatureHeight: 60, stamp: '', stampHeight: 70, upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
   });
   // v1.10.36 — Scroll-spy: which section is currently in the viewport,
   // so the corresponding pill lights up as the user scrolls. Cheap
@@ -66,6 +66,19 @@ export default function SettingsView({ onSaved }) {
   // anywhere on the page and unsaved work is never silent.
   const savedProfileRef = useRef(null);
   const [profileDirty, setProfileDirty] = useState(false);
+  // Both the save bar and the "Jump to" bar stick to the top. They used to
+  // share top: 0, so the save bar sat on top of the jump bar and hid it. The
+  // jump bar now sticks just below the save bar, measured live because the
+  // save bar wraps to two lines on narrow screens.
+  const saveBarRef = useRef(null);
+  const [saveBarH, setSaveBarH] = useState(56);
+  useEffect(() => {
+    const el = saveBarRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => setSaveBarH(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // v1.10.56 — reported (#44, @sangwanmail-eng): "Firm profile setting not
   // saved. every time show popup".
@@ -137,6 +150,17 @@ export default function SettingsView({ onSaved }) {
   const [invNumSaving, setInvNumSaving] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // v1.10.69 - see runUpdateNow() in store.js: this used to be a link to a URL
+  // protocol that no current install registers, so it did nothing at all.
+  const [updatingNow, setUpdatingNow] = useState(false);
+  const handleSettingsUpdateNow = async () => {
+    setUpdatingNow(true);
+    toast('Updating… your data is backed up first. This takes about a minute.', 'info', 8000);
+    const result = await runUpdateNow();
+    setUpdatingNow(false);
+    toast(result.ok ? 'Update finished. Reload the page to use the new version.' : `Update failed — ${result.error}`,
+      result.ok ? 'success' : 'error', 10000);
+  };
   const [regionMode, setRegionModeState] = useState(getRegionMode());
   const [enabledModules, setEnabledModulesState] = useState(getEnabledModules());
   const [stockAlerts, setStockAlerts] = useState({ enabled: true, threshold: 5 });
@@ -151,11 +175,13 @@ export default function SettingsView({ onSaved }) {
   const resetModules = () => {
     setEnabledModulesState({});
     setEnabledModules({});
-    toast('Reset to default — all features visible', 'success');
+    // v1.10.74 - defaults keep some features off (e.g. TDS/TCS), so don't say "all visible"
+    toast('Features reset to default', 'success');
   };
   const fileInputRef = useRef(null);
   const logoInputRef = useRef(null);
   const sigInputRef = useRef(null);
+  const stampInputRef = useRef(null);
   const companyFormRef = useRef(null);
   const visibleCountries = getCountriesForRegion(regionMode);
 
@@ -267,7 +293,7 @@ export default function SettingsView({ onSaved }) {
   const removeAccount = async (acc) => {
     if (!await confirmAction({
       title: `Delete payment account "${acc.label || acc.bankName || 'this account'}"?`,
-      message: 'Existing invoices that used this account keep their frozen bank-detail snapshots (v1.10.19 invariant) — the PDFs stay exactly as printed.',
+      message: 'Existing invoices that used this account keep their bank details as they were saved, so their PDFs stay exactly as printed.',
       confirmLabel: 'Delete account',
       tone: 'danger',
     })) return;
@@ -340,7 +366,7 @@ export default function SettingsView({ onSaved }) {
       const reader = new FileReader();
       reader.onload = (ev) => {
         setProfile(prev => ({ ...prev, [field]: ev.target.result }));
-        toast(`${field === 'logo' ? 'Logo' : 'Signature'} uploaded — click Save Profile to keep it.`, 'success', 4000);
+        toast(`${({ logo: 'Logo', signature: 'Signature', stamp: 'Stamp' })[field] || 'Image'} uploaded — click Save Profile to keep it.`, 'success', 4000);
       };
       reader.onerror = () => toast('Could not read the SVG file.', 'error');
       reader.readAsDataURL(file);
@@ -379,7 +405,7 @@ export default function SettingsView({ onSaved }) {
       const preservesAlpha = /png|webp|svg/i.test(file.type) && field !== 'logo';
       const dataUrl = canvas.toDataURL(preservesAlpha ? 'image/png' : 'image/jpeg', 0.92);
       setProfile(prev => ({ ...prev, [field]: dataUrl }));
-      toast(`${field === 'logo' ? 'Logo' : 'Signature'} uploaded — click Save Profile to keep it.`, 'success', 4000);
+      toast(`${({ logo: 'Logo', signature: 'Signature', stamp: 'Stamp' })[field] || 'Image'} uploaded — click Save Profile to keep it.`, 'success', 4000);
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
@@ -466,9 +492,8 @@ export default function SettingsView({ onSaved }) {
       return `${pfx}${sep}A3X9K2`;
     }
     if (s.showFinYear) {
-      const yr = new Date().getFullYear();
-      const ny = (yr + 1).toString().slice(-2);
-      return `${pfx}${sep}${yr}-${ny}${sep}${padded}`;
+      // v1.10.74 - financial year, not calendar year (Jan-Mar belongs to the previous FY)
+      return `${pfx}${sep}${getFinancialYearLabel()}${sep}${padded}`;
     }
     return `${pfx}${sep}${padded}`;
   };
@@ -528,7 +553,8 @@ export default function SettingsView({ onSaved }) {
   const toggleExport = (id) => setExportSel(prev => ({ ...prev, [id]: !prev[id] }));
   const toggleImport = (id) => setImportSel(prev => ({ ...prev, [id]: !prev[id] }));
   const exportToggleAll = (val) => setExportSel(Object.fromEntries(ALL_BACKUP_PARTS.map(p => [p.id, val])));
-  const importToggleAll = (val) => setImportSel(Object.fromEntries(ALL_BACKUP_PARTS.map(p => [p.id, val])));
+  // v1.10.74 - "Select all (with data)" ticks only categories that have data in the file
+  const importToggleAll = (val) => setImportSel(Object.fromEntries(ALL_BACKUP_PARTS.map(p => [p.id, val && (importInspection?.counts?.[p.id] || 0) > 0])));
 
   const runExport = async () => {
     try {
@@ -590,12 +616,20 @@ export default function SettingsView({ onSaved }) {
   const runImport = async () => {
     try {
       const result = await importData(importJsonText, importSel);
+      // v1.10.74 - list every restored category, not just five of them
       const parts = [];
       if (result.billCount) parts.push(`${result.billCount} invoice(s)`);
       if (result.hasProfile) parts.push('profile');
+      if (result.profileCount) parts.push(`${result.profileCount} business profile(s)`);
       if (result.templateCount) parts.push(`${result.templateCount} template(s)`);
       if (result.clientCount) parts.push(`${result.clientCount} client(s)`);
       if (result.productCount) parts.push(`${result.productCount} product(s)`);
+      if (result.expenseCount) parts.push(`${result.expenseCount} expense(s)`);
+      if (result.purchaseCount) parts.push(`${result.purchaseCount} purchase bill(s)`);
+      if (result.recurringCount) parts.push(`${result.recurringCount} recurring invoice(s)`);
+      if (result.receiptCount) parts.push(`${result.receiptCount} receipt(s)`);
+      const lsCount = importSel.localStorage ? (importInspection?.counts?.localStorage || 0) : 0;
+      if (lsCount) parts.push(`${lsCount} local preference(s)`);
       toast(parts.length ? `Restored: ${parts.join(', ')}` : 'Restore complete', 'success');
       if (importSel.profile) { const p = await getProfile(); setProfile(p); if (onSaved) onSaved(p); }
       if (importSel.termsTemplates) loadTemplates();
@@ -667,13 +701,36 @@ export default function SettingsView({ onSaved }) {
     }
   };
 
-  const handleAddNewProfile = () => {
-    setProfile({
-      businessName: '', address: '', city: '', state: '', pin: '', country: detectCountryFromBrowser(),
+  // v1.10.67 (#66 item 3, @sangwanmail-eng) — park the company that is on
+  // screen into Business Profiles BEFORE clearing the form. This used to just
+  // blank the fields, so the next Save wrote the new company over the old one
+  // - and on a fresh install the old one had never been saved as a profile,
+  // which meant it was gone for good. Clearing also resets the unsaved-changes
+  // baseline, so an empty form no longer claims you have unsaved work.
+  const handleAddNewProfile = async () => {
+    const current = profile.businessName?.trim();
+    if (current) {
+      const existing = businessProfiles.find(bp => bp.businessName.trim().toLowerCase() === current.toLowerCase());
+      try {
+        await saveBusinessProfile({ ...profile, id: existing?.id || undefined });
+        await loadBusinessProfiles();
+      } catch {
+        toast('Could not save the current company, so nothing was cleared. Try Save Profile first.', 'error');
+        return;
+      }
+    }
+    // #66 item 2 — a second company is almost always in the same country as
+    // the first, and this is an India-first app; the browser locale guessed
+    // United States on an Indian shop and started them on a US form.
+    const blank = {
+      businessName: '', address: '', city: '', state: '', pin: '', country: profile.country || 'India',
       gstin: '', pan: '', email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
-      logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
-    });
+      logo: '', logoHeight: 48, signature: '', signatureHeight: 60, stamp: '', stampHeight: 70, upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
+    };
+    setProfile(blank);
+    markProfileSaved(blank);
     setTaxIdWarning('');
+    toast(current ? `${current} is safe in Business Profiles below - fill in the new company and press Save Profile` : 'Fill in the new company, then press Save Profile', 'info', 6000);
     companyFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -691,8 +748,11 @@ export default function SettingsView({ onSaved }) {
            section, instead of only from the bottom of a 450-line form the
            user has already scrolled past. Rendered only while there are
            real changes, so it never nags. */}
-      {profileDirty && (
-        <div style={{
+      {/* v1.10.67 (#66 item 9) — the bar is always on screen now, so Settings
+           has one Save at the top instead of a button 450 lines down. It turns
+           amber only when Company Details has unsaved edits; every other
+           section still saves the moment it is changed. */}
+      <div ref={saveBarRef} style={{
           position: 'sticky',
           top: 0,
           zIndex: 30,
@@ -704,15 +764,17 @@ export default function SettingsView({ onSaved }) {
           padding: '0.7rem 1rem',
           marginBottom: '0.9rem',
           borderRadius: 10,
-          border: '1px solid #f59e0b',
-          background: 'rgba(245, 158, 11, 0.12)',
+          border: profileDirty ? '1px solid #f59e0b' : '1px solid var(--border)',
+          background: profileDirty ? 'rgba(245, 158, 11, 0.12)' : 'var(--card-bg)',
           backdropFilter: 'blur(6px)',
         }}>
           <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text)' }}>
-            You have unsaved changes in <strong>Company Details</strong>.
+            {profileDirty
+              ? <>You have unsaved changes in <strong>Company Details</strong>.</>
+              : <>Everything is saved. Bank accounts, Features and Region save as you change them; Invoice Number Format, Low-stock alerts and Terms have their own Save buttons.</>}
           </span>
           <span style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-            <button
+            {profileDirty && <button
               type="button"
               className="btn"
               onClick={() => {
@@ -722,7 +784,7 @@ export default function SettingsView({ onSaved }) {
               style={{ fontSize: '0.85rem' }}
             >
               Discard
-            </button>
+            </button>}
             <button
               type="button"
               className="btn btn-primary"
@@ -733,8 +795,7 @@ export default function SettingsView({ onSaved }) {
               <Save size={16} /> {saving ? 'Saving…' : 'Save Profile'}
             </button>
           </span>
-        </div>
-      )}
+      </div>
 
       {/* v1.10.36 — Header lifted with a soft primary-accent gradient
            card, gear glyph in a rounded badge for visual identity, and
@@ -766,16 +827,16 @@ export default function SettingsView({ onSaved }) {
               </span>
             </p>
           </div>
-          <HelpButton title="Settings — how to use">
+          <HelpButton title="Settings — how to use" doc="settings">
             <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
               <li><strong>Company Details</strong> — this is the header block on every invoice. GSTIN drives place-of-supply detection.</li>
-              <li><strong>Multi-business profiles</strong> — Save as Profile keeps the current form as a switchable profile; switch between them from the invoice generator.</li>
+              <li><strong>Multi-business profiles</strong> — Save as Profile keeps the current form as a switchable profile; switch between them from the business name at the top of the sidebar.</li>
               <li><strong>Payment Accounts</strong> — add multiple bank / UPI accounts; ⭐ marks the default. Every inline change (add / edit / ⭐ / reorder / delete) auto-saves.</li>
               <li><strong>Invoice Number Settings</strong> — brand prefix, financial-year suffix, padding. Live preview at the bottom.</li>
               <li><strong>Print Settings</strong> — templates, colors, watermark, thermal font size, per-type prefix overrides.</li>
               <li><strong>Backup Management</strong> — daily auto-backups kept 30 days. Restore any date, or Delete to reclaim disk. Trash bin keeps deleted invoices for 30 days.</li>
-              <li><strong>Google Drive sync</strong> — connect once to auto-upload every backup to your own Drive.</li>
-              <li><strong>Import / Export</strong> — CSV import for products/clients; JSON export for full backup portability.</li>
+              <li><strong>Google Drive</strong> — easiest: install Google Drive for Desktop and sync the Saved Invoices folder. Advanced: connect your own Google Client ID to upload each downloaded invoice PDF.</li>
+              <li><strong>Data Management</strong> — export all or part of your data to one backup file, and import it here or on another computer. Clients and products import from CSV on their own screens.</li>
             </ul>
           </HelpButton>
         </div>
@@ -792,7 +853,7 @@ export default function SettingsView({ onSaved }) {
            line". Now: nowrap + overflow-x auto, thin custom
            scrollbar, edge-fade masks so users know there's more. */}
       <nav className="settings-jumpnav" aria-label="Settings sections" style={{
-        position: 'sticky', top: 0, zIndex: 20,
+        position: 'sticky', top: saveBarH + 6, zIndex: 20,
         background: 'rgba(var(--card-bg-rgb, 255, 255, 255), 0.82)',
         backdropFilter: 'saturate(1.5) blur(12px)',
         WebkitBackdropFilter: 'saturate(1.5) blur(12px)',
@@ -816,7 +877,13 @@ export default function SettingsView({ onSaved }) {
               onClick={(e) => {
                 e.preventDefault();
                 const el = document.getElementById(id);
-                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                // Stop below both sticky bars, not underneath them.
+                if (el) {
+                  const nav = e.currentTarget.closest('nav');
+                  const offset = saveBarH + (nav?.offsetHeight || 50) + 20;
+                  el.style.scrollMarginTop = `${offset}px`;
+                  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
               }}
               style={{
                 fontSize: '0.76rem',
@@ -1363,7 +1430,7 @@ export default function SettingsView({ onSaved }) {
             <label className="form-label">Format Style</label>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               {[
-                { id: 'branded', label: 'Branded Sequential', desc: 'PREFIX/2026-27/0001' },
+                { id: 'branded', label: 'Branded Sequential', desc: `PREFIX/${getFinancialYearLabel()}/0001` },
                 { id: 'sequential', label: 'Simple Sequential', desc: 'PREFIX/0001' },
                 { id: 'random', label: 'Random', desc: 'PREFIX/A3X9K2' },
               ].map(f => (
@@ -1401,8 +1468,8 @@ export default function SettingsView({ onSaved }) {
               <label className="form-label">Brand Prefix</label>
               <input type="text" className="form-input" value={invNumSettings.brandPrefix}
                 onChange={e => handleInvNumChange('brandPrefix', e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
-                placeholder="e.g. ACME, BK (leave empty for INV/EST/CN)" maxLength={10} />
-              <p className="field-hint">Your brand name or abbreviation. Leave empty to use default type prefix (INV, EST, CN, BOS).</p>
+                placeholder="e.g. ACME, BK (leave empty for INV/QUO/EST/BOS/COMP/CN/DC)" maxLength={10} />
+              <p className="field-hint">Your brand name or abbreviation. Leave empty to use default type prefix (INV, QUO, EST, BOS, COMP, CN, DC).</p>
             </div>
             <div className="form-group">
               <label className="form-label">Separator</label>
@@ -1424,7 +1491,7 @@ export default function SettingsView({ onSaved }) {
                   <div style={{ display: 'flex', gap: '0.5rem', marginTop: 4 }}>
                     <button type="button"
                       className={`type-chip ${invNumSettings.showFinYear ? 'type-chip-active' : ''}`}
-                      onClick={() => handleInvNumChange('showFinYear', true)}>Yes (2026-27)</button>
+                      onClick={() => handleInvNumChange('showFinYear', true)}>Yes ({getFinancialYearLabel()})</button>
                     <button type="button"
                       className={`type-chip ${!invNumSettings.showFinYear ? 'type-chip-active' : ''}`}
                       onClick={() => handleInvNumChange('showFinYear', false)}>No</button>
@@ -1475,26 +1542,66 @@ export default function SettingsView({ onSaved }) {
                 </div>
               ) : (
                 <button type="button" className="upload-btn" onClick={() => logoInputRef.current?.click()}>
-                  <ImageIcon size={20} /><span>Upload Logo</span><span className="upload-hint">PNG or JPG, square or wide (max 500KB)</span>
+                  <ImageIcon size={20} /><span>Upload Logo</span><span className="upload-hint">PNG or JPG, square or wide (up to 5 MB)</span>
                 </button>
               )}
               <input ref={logoInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageUpload('logo', e)} />
             </div>
           </div>
           <div className="form-group">
-            <label className="form-label">Signature / Stamp</label>
+            <label className="form-label">Signature</label>
             <div className="upload-area">
               {profile.signature ? (
-                <div className="upload-preview">
-                  <img src={profile.signature} alt="Signature" className="upload-img" />
-                  <button type="button" className="icon-btn icon-btn-red upload-remove" onClick={() => removeImage('signature')}><Trash2 size={14} /></button>
+                <div className="logo-upload-section">
+                  <div className="logo-preview-box">
+                    <img src={profile.signature} alt="Signature" style={{ height: `${profile.signatureHeight || 60}px`, maxWidth: '180px', objectFit: 'contain', display: 'block' }} />
+                    <button type="button" className="icon-btn icon-btn-red upload-remove" onClick={() => removeImage('signature')}><Trash2 size={14} /></button>
+                  </div>
+                  <div className="logo-size-control">
+                    <label className="form-label" style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>Signature Size on Invoice</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>S</span>
+                      <input type="range" min="30" max="110" value={profile.signatureHeight || 60} onChange={(e) => setProfile(prev => ({ ...prev, signatureHeight: Number(e.target.value) }))} className="logo-slider" />
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>L</span>
+                    </div>
+                    <span style={{ fontSize: '0.65rem', color: '#94a3b8' }}>{profile.signatureHeight || 60}px height</span>
+                  </div>
+                  <button type="button" className="upload-change-btn" onClick={() => sigInputRef.current?.click()}>Change Signature</button>
                 </div>
               ) : (
                 <button type="button" className="upload-btn" onClick={() => sigInputRef.current?.click()}>
-                  <PenTool size={20} /><span>Upload Signature</span><span className="upload-hint">PNG, JPG (max 500KB)</span>
+                  <PenTool size={20} /><span>Upload Signature</span><span className="upload-hint">PNG or JPG (up to 5 MB)</span>
                 </button>
               )}
               <input ref={sigInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageUpload('signature', e)} />
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Company Stamp / Seal</label>
+            <div className="upload-area">
+              {profile.stamp ? (
+                <div className="logo-upload-section">
+                  <div className="logo-preview-box">
+                    <img src={profile.stamp} alt="Stamp" style={{ height: `${profile.stampHeight || 70}px`, maxWidth: '180px', objectFit: 'contain', display: 'block' }} />
+                    <button type="button" className="icon-btn icon-btn-red upload-remove" onClick={() => removeImage('stamp')}><Trash2 size={14} /></button>
+                  </div>
+                  <div className="logo-size-control">
+                    <label className="form-label" style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>Stamp Size on Invoice</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>S</span>
+                      <input type="range" min="30" max="120" value={profile.stampHeight || 70} onChange={(e) => setProfile(prev => ({ ...prev, stampHeight: Number(e.target.value) }))} className="logo-slider" />
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>L</span>
+                    </div>
+                    <span style={{ fontSize: '0.65rem', color: '#94a3b8' }}>{profile.stampHeight || 70}px height</span>
+                  </div>
+                  <button type="button" className="upload-change-btn" onClick={() => stampInputRef.current?.click()}>Change Stamp</button>
+                </div>
+              ) : (
+                <button type="button" className="upload-btn" onClick={() => stampInputRef.current?.click()}>
+                  <ImageIcon size={20} /><span>Upload Stamp</span><span className="upload-hint">PNG with a transparent background looks best (up to 5 MB)</span>
+                </button>
+              )}
+              <input ref={stampInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageUpload('stamp', e)} />
             </div>
           </div>
         </div>
@@ -1604,7 +1711,7 @@ export default function SettingsView({ onSaved }) {
                   placeholder="xxxx.apps.googleusercontent.com" />
                 <p className="field-hint">
                   <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer"
-                    style={{ color: 'var(--primary)' }}>Open Google Cloud Console</a> &rarr; Create Project &rarr; Enable Drive API &rarr; Create OAuth Client ID (Web app) &rarr; Add <code>http://localhost:5173</code> as origin.
+                    style={{ color: 'var(--primary)' }}>Open Google Cloud Console</a> &rarr; Create Project &rarr; Enable Drive API &rarr; Create OAuth Client ID (Web app) &rarr; Add <code>{window.location.origin}</code> as origin.
                 </p>
               </div>
               <div className="form-group">
@@ -1661,6 +1768,8 @@ export default function SettingsView({ onSaved }) {
                 { name: 'Freelancer (Simple)', content: '1. Payment due within 7 days of invoice via UPI/NEFT/IMPS.\n2. Late payments attract interest @ 2% per month.\n3. 50% advance required before project commencement.\n4. Scope changes after agreement will be quoted and billed separately.\n5. All work remains property of the freelancer until full payment is received.\n6. Cancellation after work begins: completed portion will be billed proportionally.\n7. TDS (if applicable) to be deducted at source. Share Form 16A within 15 days of deduction.\n8. Subject to jurisdiction of courts in the freelancer\'s city.\n9. This is a computer-generated invoice.' },
               ].map((qt, i) => (
                 <button key={i} type="button" className="quick-template-btn" onClick={async () => {
+                  // v1.10.74 - don't add a second copy when clicked twice
+                  if (termsTemplates.some(t => t.name === qt.name)) { toast('You already have this template', 'info'); return; }
                   await saveTermsTemplate({ name: qt.name, content: qt.content });
                   toast(`Added: ${qt.name}`, 'success');
                   loadTemplates();
@@ -1752,10 +1861,10 @@ export default function SettingsView({ onSaved }) {
         {updateInfo?.updateAvailable && (
           <div className="update-available-box">
             <p><strong>New version v{updateInfo.latest} is available!</strong></p>
-            <p>Your data will not be affected. Click below to update:</p>
-            <a href="freegstbill-update://run" className="btn btn-primary" style={{ marginTop: '0.5rem', display: 'inline-flex', textDecoration: 'none' }}>
-              <Download size={18} /> Update Now
-            </a>
+            <p>Your data is backed up first and is not affected. Click below to update:</p>
+            <button type="button" className="btn btn-primary" disabled={updatingNow} onClick={handleSettingsUpdateNow} style={{ marginTop: '0.5rem', display: 'inline-flex' }}>
+              <Download size={18} /> {updatingNow ? 'Updating…' : 'Update Now'}
+            </button>
           </div>
         )}
       </div>
@@ -1987,14 +2096,19 @@ function BackupAndTrashPanel() {
             💾 Backup Management + 🗑 Trash Bin
           </h3>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
-            Automatic daily snapshots kept for 30 days · Deleted invoices soft-trash for 30 days (v1.9.5+).
+            Automatic daily snapshots kept for 30 days · Deleted invoices stay in the trash for 30 days.
           </p>
         </div>
         <button className="btn btn-secondary" style={{ fontSize: '0.82rem' }}
           onClick={async () => {
-            await triggerBackup();
-            toast('Manual backup triggered', 'success');
-            loadAll();
+            // v1.10.74 - show an error instead of failing silently
+            try {
+              await triggerBackup();
+              toast('Manual backup triggered', 'success');
+              loadAll();
+            } catch (err) {
+              toast('Backup failed: ' + (err.message || 'unknown error'), 'error');
+            }
           }}>
           <SaveIcon size={14} /> Backup now
         </button>

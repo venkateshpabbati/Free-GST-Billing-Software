@@ -4,6 +4,7 @@ import { getAllProducts, saveProduct, deleteProduct, getProfile, getStockAlertSe
 import { getAllUnits, getCountryConfig, formatCurrency } from '../utils';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
+import HelpButton from './HelpButton';
 
 // v1.10.29 — reported: "here purchase price and selling price need".
 // Product now carries BOTH: `purchasePrice` (what we paid the supplier) and
@@ -12,7 +13,7 @@ import { confirmAction } from './ConfirmModal';
 // still gets a valid number, but the form no longer edits it directly —
 // dead state removed for clarity.
 const emptyForm = {
-  name: '', hsn: '', purchasePrice: '', sellingPrice: '', taxPercent: '', unit: 'Nos', stock: '', description: '',
+  name: '', hsn: '', purchasePrice: '', sellingPrice: '', taxPercent: '', unit: 'Pcs', stock: '', description: '',
 };
 
 export default function InventoryView() {
@@ -71,7 +72,7 @@ export default function InventoryView() {
       sellingPrice: product.sellingPrice ?? product.rate ?? '',
       taxPercent: product.taxPercent || '',
       unit: product.unit || 'Nos',
-      stock: product.stock || '',
+      stock: product.stock ?? '', // v1.10.74 - was `|| ''`, which blanked a stock of 0
       description: product.description || '',
     });
     setEditingId(product.id);
@@ -87,6 +88,12 @@ export default function InventoryView() {
   const handleSave = async () => {
     if (!form.name.trim()) {
       toast('Product name is required', 'warning');
+      return;
+    }
+    // v1.10.74 - the input's min/max are not enforced by the browser on save.
+    const gst = form.taxPercent === '' ? 0 : Number(form.taxPercent);
+    if (!Number.isFinite(gst) || gst < 0 || gst > 100) {
+      toast('GST % must be between 0 and 100', 'warning');
       return;
     }
     try {
@@ -161,6 +168,10 @@ export default function InventoryView() {
       if (lines.length < 2) { toast('CSV file is empty or has no data rows', 'warning'); return; }
       const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
       let imported = 0;
+      // v1.10.74 - importing the same file twice made duplicates. Skip names
+      // already in the list (trimmed, any case), including repeats inside the file.
+      let skipped = 0;
+      const known = new Set(products.map(p => (p.name || '').trim().toLowerCase()));
       for (let i = 1; i < lines.length; i++) {
         const values = parseCSVLine(lines[i]);
         if (values.length === 0) continue;
@@ -168,6 +179,8 @@ export default function InventoryView() {
         headers.forEach((h, idx) => { row[h] = (values[idx] || '').trim(); });
         const name = row.name || row.product || row['product name'] || '';
         if (!name) continue;
+        if (known.has(name.toLowerCase())) { skipped++; continue; }
+        known.add(name.toLowerCase());
         await saveProduct({
           name,
           hsn: row.hsn || row['hsn code'] || row['sac'] || '',
@@ -179,7 +192,7 @@ export default function InventoryView() {
         });
         imported++;
       }
-      toast(`Imported ${imported} product${imported !== 1 ? 's' : ''}`, 'success');
+      toast(`Imported ${imported} product(s)${skipped ? `, skipped ${skipped} already in your list` : ''}`, 'success');
       loadProducts();
     } catch {
       toast('Failed to parse CSV file', 'error');
@@ -190,9 +203,19 @@ export default function InventoryView() {
   return (
     <div className="dashboard-container">
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Inventory</h1>
-          <p className="page-subtitle">Manage your products and services catalog</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div>
+            <h1 className="page-title">Products</h1>
+            <p className="page-subtitle">Manage your products and services catalog</p>
+          </div>
+          <HelpButton title="Products — how to use" doc="products">
+            <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
+              <li><strong>Add Product</strong>: name, HSN/SAC, purchase and selling price, GST %, unit and stock. Typing the name on an invoice fills the rest in.</li>
+              <li><strong>Stock</strong> goes down when you save an invoice and up when you save a purchase bill.</li>
+              <li><strong>Import CSV</strong>: columns <code>name, hsn, rate, gst%, unit, stock</code>.</li>
+              <li><strong>Low stock</strong> shows in amber, none in red. Set the level in Settings → Low-stock alerts.</li>
+            </ul>
+          </HelpButton>
         </div>
         <div className="flex gap-2">
           <input type="file" accept=".csv" ref={csvInputRef} style={{ display: 'none' }} onChange={handleCSVImport} />
@@ -252,7 +275,7 @@ export default function InventoryView() {
               <div className="form-group">
                 <label className="form-label">GST %</label>
                 <input type="number" className="form-input" value={form.taxPercent}
-                  onChange={e => updateField('taxPercent', e.target.value)} placeholder="18" min="0" max="28" />
+                  onChange={e => updateField('taxPercent', e.target.value)} placeholder="18" min="0" max="100" />
               </div>
               <div className="form-group">
                 <label className="form-label">Unit</label>

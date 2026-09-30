@@ -603,6 +603,615 @@ full update under dash.
 
 ---
 
+## ERR-015 - "Add New Profile" blanked the form and called it a new company
+
+**Version:** broke when multi-business landed · fixed in v1.10.67
+**Reported by:** @sangwanmail-eng (#66 item 3)
+
+**Symptom** - *"when adding a new company, the newly added company profile
+replaces the existing company profile. This issue is particularly noticeable
+when using the software for the first time."* Plus an unsaved-changes bar for a
+form the user had not touched.
+
+**Cause** - `handleAddNewProfile` only called `setProfile({ ...blank })`. The
+active profile file still held the old company, so the next **Save Profile**
+overwrote it. On a first install that company had never been copied into
+`data/profiles/`, so there was no surviving copy anywhere. The blank form also
+differed from the saved baseline, which is what raised the unsaved-changes bar.
+
+**Rule** - a "start a new X" button must persist the current X before it clears
+the form, and reset the dirty baseline afterwards. Clearing a form is not the
+same as creating a record, and the active profile is a single file, not a list.
+
+**Guard** - `tests/smoke.mjs` (#66): after Add New Profile the previous company
+is present in Business Profiles and the form is not marked dirty.
+
+---
+
+## ERR-016 - Every document type counted as turnover
+
+**Version:** fixed in v1.10.67
+**Reported by:** @sangwanmail-eng (#66 item 7)
+
+**Symptom** - *"Why are documents such as Proforma/Estimate, Delivery Challan,
+Composition, Credit Note and Bill of Supply included in the Total Invoiced
+Amount?"* A screenshot showed ₹4,248 of "sales" where ₹1,239 was an estimate.
+
+**Cause** - the dashboard cards summed every bill row. `invoiceType` was only
+ever used for labels and numbering, never for deciding what is turnover.
+
+**Rule** - money questions go through one rule, not per-screen filters:
+`salesSign()` in `src/utils.js` returns +1 for a sale (tax invoice, bill of
+supply, composition), -1 for a credit note and 0 for quotes, challans and
+anything cancelled. Every new money figure uses it.
+
+**Guard** - `scripts/tax-test.mjs` `[V67-#66]` covers all eight cases; the smoke
+suite checks a proforma and a challan do not move Total Invoiced while a sale
+and a credit note do.
+
+---
+
+## ERR-017 - Launcher said "_system folder is missing" while Explorer showed it
+
+**Version:** shipped with the one-launcher layout in v1.10.44 · explained in v1.10.69
+**Reported by:** the maintainer, with a photo of the screen (2026-09-23)
+
+**Symptom** - the launcher opens and says *"`_system` folder is missing - Please
+re-extract the ZIP or re-download from GitHub Releases"*, while the Explorer
+window right behind it is listing `_system` in the very folder the user just
+double-clicked in. It reads as a broken download.
+
+**Cause** - Windows lets you double-click a file **inside** a ZIP without
+extracting anything. It copies that one file to
+`%TEMP%\Temp1_<name>.zip\<inner folder>\` and runs it from there, with no
+siblings. The launcher was reporting the truth about the temp folder it had
+been copied into; the folder the user was looking at was a different one. The
+message named a cause ("re-extract") without ever naming the folder it had
+checked, so there was no way to tell the two apart.
+
+**Rule** - when a program reports that a file is missing, it names the folder it
+looked in. A path the user can compare against what is on screen ends the
+argument in one glance; "a file is missing" starts it.
+
+**Guard** - the launcher now detects a `%LOCALAPPDATA%\Temp\` location and says
+so in its own words ("Windows opened this file straight out of the ZIP"), with
+numbered steps and a button that opens the Downloads folder. Any other missing
+`_system` prints the folder it checked. Verified by running the launcher from a
+simulated `Temp1_*.zip` folder and screenshotting both states; there is no
+automated check, because nothing can drive `mshta` headlessly.
+
+---
+
+## ERR-018 - "Open App" never opened the browser, on any machine
+
+**Version:** broke in v1.10.44, when the HTA launcher replaced the .bat files · fixed in v1.10.69
+**Reported by:** found by installing the real release ZIP end to end (2026-09-23)
+
+**Symptom** - the installer finishes, the server starts, and the console then
+says *"Server did not respond in 15s. Check for errors in this window."* The
+browser never opens. The app is running the whole time: paste the address in
+by hand and it answers immediately.
+
+**Cause** - `start-windows.ps1` decided whether the server was up with
+`Invoke-WebRequest -Uri http://localhost:$p/api/profile -TimeoutSec 1`. Windows
+PowerShell 5.1 runs the system proxy auto-detect (WPAD) on every web request,
+including requests to `127.0.0.1`, and that costs about two seconds on a
+machine with a proxy, a VPN or a corporate network. With a one-second timeout
+the check could never return true - measured on a real install: `-TimeoutSec 1`
+always times out, `-TimeoutSec 10` succeeds in 2.07s, and the same request with
+`DefaultWebProxy = $null` succeeds in **0.03s**. Meanwhile the server itself was
+accepting TCP connections 0.6 seconds after launch. So the script also believed
+no server was running when one was, and started a second copy every time.
+
+**Rule** - a loopback health check sets `[System.Net.WebRequest]::DefaultWebProxy
+= $null` and addresses `127.0.0.1`, never `localhost` behind a system proxy.
+And a timeout is a bound on how long the *other* end may take, never a bet on
+how fast the local HTTP stack starts: give it seconds, not one second.
+
+**Rule (second)** - a packaged installer is tested by installing the package.
+The release gate boots `server.js` with node directly, which is why it passed
+65 checks a release while the thing every Windows user actually double-clicks
+was broken. Run the real `install-windows.ps1` from a real extracted ZIP
+before shipping a release that touches the launcher or the scripts.
+
+**Guard** - none automated (it needs a real Windows desktop session and a
+browser). Verified by hand: extract the ZIP, run `_system\install-windows.ps1`,
+and confirm the browser opens on `http://localhost:47371` with no warning.
+
+---
+
+## ERR-037 - GSTR-3B counted exports twice; HSN summary added credit notes
+
+**Version:** broke before v1.10.67 · fixed in v1.10.74
+**Reported by:** found while documenting the GST Returns screen
+
+**Symptom** - an export to a client without a GSTIN appeared in the B2C
+table and in 3.1(a) as well as 3.1(b), and its IGST was added to output tax
+twice. Credit notes raised the HSN summary instead of lowering it.
+
+**Cause** - `b2cBills` in GSTReturns.jsx was "every bill with no client
+GSTIN", which includes exports and credit notes; the HSN aggregation added
+every line with a + sign.
+
+**Rule** - every return table starts from one classification: exports,
+B2B, B2C and credit notes are disjoint sets, and a credit note always carries
+sign -1 wherever it is summed.
+
+**Guard** - none automated yet (GSTReturns has no unit-testable totals
+function). By hand: one export without GSTIN must appear only in 3.1(b).
+
+---
+
+## ERR-036 - "Needs a Quick Start" appeared while the app was running
+
+**Version:** since the continuous server check · fixed in v1.10.73
+**Reported by:** found by the release test on a machine at 100% CPU
+
+**Symptom** - mid-session, the whole app was replaced by "Free GST Billing
+Software Needs a Quick Start ... Starting..." although the server was running
+and answered in milliseconds a moment later.
+
+**Cause** - `App.jsx` polls `/api/profile` every 5 s with a 3 s timeout, and a
+single slow reply set `serverDown`, which swaps the whole app for the notice.
+On a loaded PC one reply can take longer than 3 s.
+
+**Rule** - a liveness check that can take the whole screen away needs more
+than one failure: judge "down" on consecutive misses, and only trust a single
+miss before the app has ever loaded.
+
+**Guard** - none automated (needs a controlled slow server). By hand: pause
+the server process for ~6 s mid-session; the app must stay on screen.
+
+---
+
+## ERR-035 - Control Panel: "Launcher scripts not detected" on every install
+
+**Version:** broke in v1.10.44 (Control Panel) and v1.10.69 (Update Now uses it) · fixed in v1.10.72
+**Reported by:** @deppen12 (GitHub #73)
+
+**Symptom**
+
+```
+Launcher scripts not detected. This app appears to be running from a dev clone
+(npm start) rather than an installer ZIP. Update / Backup / Restore / Move
+buttons need the launcher scripts under _system-scripts/.
+```
+
+Every button behind it answered `Script not found for this platform`,
+including Update Now in Settings and the sidebar.
+
+**Cause** - `scripts/build-release-zip.mjs` has always FLATTENED
+`release-templates/_system-scripts/*` into `_system/`, next to `server.js`.
+`server.js` looked only for folders named `_system-scripts` (inside
+`_system`, in `release-templates`, and beside `_system`). None of them exists
+in a ZIP install, so the lookup found nothing. The release test never touched
+the Control Panel, so no check noticed.
+
+**Rule** - when the packager moves a file, every path that reads it moves in
+the same change. A folder is chosen because it contains the file needed, never
+because a folder of that name exists.
+
+**Guard** - `tests/smoke.mjs` "#73 the Control Panel finds its update and
+backup scripts" (and, on Windows, all five). `verify-release.mjs` runs the
+suite on a fresh install of the ZIP, so the real layout is what is tested.
+Verified red: the v1.10.70 ZIP install reports `controlScriptsAvailable: false`.
+
+---
+
+## ERR-034 - Settings: the save bar sat on top of the "Jump to" bar
+
+**Version:** broke in v1.10.67 · fixed in v1.10.71
+**Reported by:** found while taking documentation screenshots
+
+**Symptom** - once Settings was scrolled, the "Jump to" section buttons were
+hidden behind the "Everything is saved" bar and could not be clicked.
+
+**Cause** - both bars were `position: sticky; top: 0`. The save bar was made
+always-visible in v1.10.67 without moving the jump bar down.
+
+**Rule** - two sticky elements in one scroll area need stacked `top` offsets,
+and the lower one's offset must follow the upper one's real height (it wraps
+on narrow screens).
+
+**Guard** - none automated. By hand: open Settings, scroll down, check the
+jump bar sits below the save bar, and a jump lands below both.
+
+---
+
+## ERR-033 - Setup wizard: the chosen language reverted to English
+
+**Version:** broke in v1.10.6 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - picking Hindi (or Tamil, Marathi, Bengali) with the Retail,
+Freelancer, Wholesale or Service business type gave English labels. The
+paper size picked in the wizard changed nothing either.
+
+**Cause** - `finish()` set `labelLanguage` first, then applied the business
+preset, and four presets set `labelLanguage: 'en'`. The paper size was saved
+to print settings, which the invoice screen never reads: it reads the invoice
+defaults.
+
+**Rule** - apply presets first and the user's explicit choices after, so the
+explicit choice wins. Save a setting where the screen that uses it reads it.
+
+**Guard** - none automated. By hand: run the wizard with Retail + Hindi + 80mm,
+then open a new invoice.
+
+---
+
+## ERR-032 - Income tax: labels and PDF disagreed with the tax worked out
+
+**Version:** broke in v1.10.31 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - the screen said STCG 15% and LTCG 10% over ₹1L, the engine used
+20% and 12.5% over ₹1.25L. The 80D hint said ₹1,00,000; the tax used ₹50,000,
+and the ITR-4 PDF printed up to ₹1 lakh. Business income added GST, quotes,
+challans and foreign-currency invoices to sales. "Office rent" in a bank
+statement became rent received. Pushing a statement twice doubled it.
+
+**Cause** - the engine rates and limits were updated, the labels were not; the
+UI never passed age, so senior limits could not apply; sales used
+`totalAmount` of every non-cancelled bill; the rent-paid rule came after the
+rent rule, and the first match wins.
+
+**Rule** - labels quote the engine's values, never their own copies. Income is
+counted from real sales without GST (`salesSign`).
+
+**Guard** - `scripts/tax-test.mjs` [V71] income-tax block: office rent is an
+expense, and the ITR-4 80D line equals the limit the tax used.
+
+---
+
+## ERR-031 - Reports counted quotes and challans as sales, credit notes as income
+
+**Version:** broke before v1.10.67 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - Reports' revenue did not match the Dashboard's. Proforma
+estimates and delivery challans counted as revenue and as money owed; credit
+notes were ADDED to revenue.
+
+**Cause** - v1.10.67 introduced `salesSign()` for the Dashboard; Reports kept
+summing every non-cancelled bill.
+
+**Rule** - every total of "sales" goes through `salesSign()` / `countsAsSales()`.
+Never sum `totalAmount` over all bills.
+
+**Guard** - none in the smoke suite yet; `salesSign` itself is covered in
+`scripts/tax-test.mjs`. By hand: a proforma must not change Reports.
+
+---
+
+## ERR-030 - GST rates and the B2C Large limit were out of date
+
+**Version:** stale from Aug 2024 / Sep 2025 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - the GSTR-1 export blocked any item at 40% ("Portal accepts only
+0, 0.25, 3, 5, 12, 18, 28%"), no screen offered 40%, and B2C Large started at
+₹2.5 lakh.
+
+**Cause** - hard-coded lists from before GST 2.0 (40% from 22 Sep 2025) and
+before Notification 12/2024-CT (B2CL above ₹1 lakh from 1 Aug 2024). Adding
+40% also broke the "second-highest rate" default for new rows, which would
+have become 28%.
+
+**Rule** - GST rates and limits live in one place in `utils.js`
+(`GST_PORTAL_RATES`, `b2clThreshold`), with the date a change took effect.
+Defaults name the rate (18%), never a position in a list.
+
+**Guard** - `scripts/tax-test.mjs` [V71] rates block.
+
+---
+
+## ERR-029 - TDS / TCS came out as ₹0 on ordinary invoices
+
+**Version:** broke in v1.10.31 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - ticking TDS (194J at 10%, say) or TCS on an invoice under ₹50
+lakh gave 0.
+
+**Cause** - the ₹50 lakh threshold was applied to every section, but it belongs
+to 194Q and 206C(1H) only. And the client's running total for the year was
+never worked out: the invoice screen always passed 0.
+
+**Rule** - thresholds belong to a section, not to TDS/TCS as a whole. A
+per-client yearly total is worked out from saved invoices
+(`clientYearToDate`), by the invoice screen and the server alike.
+
+**Guard** - `scripts/tax-test.mjs` [V71] TDS/TCS and year-to-date blocks.
+
+---
+
+## ERR-028 - Recurring templates lost their settings when edited
+
+**Version:** broke in v1.10.31 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - editing a template made from an invoice wiped its "every N",
+end date or count, terms, options and business. "Generate Now" made invoices
+with no CGST/SGST/IGST split, ignored the interval and end, and never counted.
+A template with no on/off flag showed Active but never fired. Auto-fired
+invoices in Jan-Mar carried next year's financial-year label.
+
+**Cause** - the server replaces the whole record on save and the form only
+sent the fields it shows; Generate Now had its own simplified maths in the
+browser; the server checked `!tpl.active` and used the calendar year.
+
+**Rule** - an edit form spreads the full original record under its own
+fields. One code path makes recurring invoices: the server's
+`generateFromTemplate`, used by the daily run and by Generate Now.
+
+**Guard** - `tests/smoke.mjs` "v71 Generate Now" checks: works on a paused
+template, splits the tax, honours every-2-months, counts the invoice.
+
+---
+
+## ERR-027 - Deleting a purchase bill did not take its stock back out
+
+**Version:** broke in v1.10.50 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - the confirmation said "Stock levels for the products in this
+bill will be reverted", but stock stayed. Removing a row while editing a bill
+also left its stock in.
+
+**Cause** - delete only removed the file; the edit path only looked at rows
+still present.
+
+**Rule** - every path that adds stock has a matching path that removes it:
+save, edit (changed and removed rows) and delete.
+
+**Guard** - none automated. By hand: add a purchase of 5, delete it, check
+stock.
+
+---
+
+## ERR-026 - Print did not save; Save & Download could print an unsaved number
+
+**Version:** broke in v1.10.58 · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - Print handed the client a numbered invoice that was never saved.
+Save & Download built the PDF before the number was reserved, so the PDF
+could show a different number from the saved invoice. After a
+duplicate-number error, "Invoice saved" still appeared. Ctrl+S and Save &
+leave never took stock out.
+
+**Cause** - print paths never called `saveInvoiceToDB`; the download path
+called it after `buildPDF`; `saveInvoiceToDB` returned nothing on its error
+paths, so callers could not tell.
+
+**Rule** - save first, then make any output from the saved number.
+`saveInvoiceToDB` returns the saved number or null, and callers check it.
+
+**Guard** - none automated for the order. By hand: new invoice, Print, check
+it is on the Dashboard with the number printed.
+
+---
+
+## ERR-025 - Dashboard "Bulk PDF" always failed
+
+**Version:** broke in v1.10.x · fixed in v1.10.71
+**Reported by:** found while writing the documentation
+
+**Symptom** - "Could not generate any PDFs" whatever was ticked.
+
+**Cause** - `onClick={bulkExportPDF}` passed the click event into the
+function's first argument, `billsOverride`, so the event was treated as the
+list of invoices. The same pattern opened Clients' Add Client with the event
+as prefill.
+
+**Rule** - never pass a handler with parameters straight to `onClick`; wrap it:
+`onClick={() => fn()}`.
+
+**Guard** - `tests/smoke.mjs` "v71 Bulk PDF downloads a PDF of the ticked
+invoices".
+
+---
+
+## ERR-024 - A page break cut the company stamp in half
+
+**Version:** latent since page breaks learned to respect rows (v1.10.8); made likely by the stamp (v1.10.67) · fixed in v1.10.70
+**Reported by:** the maintainer, with a photo of a customer's printed invoice (2026-09-24)
+
+**Symptom** - on a two-page invoice, the top arc of the round company stamp
+printed at the foot of page 1 under "Authorized Signatory", with blank space
+below it, and the rest of the stamp at the top of page 2 beside the terms.
+
+**Cause** - the PDF is one tall capture sliced into pages. To avoid cutting
+through text, buildPDF only ends a page at the top or bottom of a table row or
+a `.inv-footer-block`. But the footer is two columns: bank details and terms
+are stacked on the left, and the signature block sits beside them on the right.
+The bottom of the bank-details block is a clean edge in the left column and
+passes straight through the stamp in the right one. Nothing checked the column
+next door. The stamp made it likely: a signature block with a 120px stamp is
+far taller than a signature alone, so the page edge lands inside it far more
+often.
+
+**Rule** - an edge is only a place to break if *nothing* straddles it. Collect
+the candidate edges, then drop every one that falls inside anything that must
+stay whole: rows, footer blocks, the signature block, and every image.
+`safePageBoundaries()` in `src/utils.js` does exactly that. And measure the
+layout that is actually captured: the extra pages are now hidden *before* the
+edges are measured, not after.
+
+**Guard** - `scripts/tax-test.mjs` `[V70-ERR-024]` models the reported footer.
+`tests/smoke.mjs` builds the dangerous invoice for real: it adds rows until the
+page-1 edge falls between the bottom of the bank details and the bottom of the
+signature, makes a real multi-page PDF, and fails if any page ends inside the
+signature block or any image. It reads a read-only test hook,
+`window.__lastPdfLayout`. Verified red: against v1.10.69 it failed with "page
+ends at 1024px - CUTS THROUGH"; against v1.10.70 page 1 ends at 880px, above
+the signature.
+
+---
+
+## ERR-023 - The app icon was unreadable at the size Windows actually draws it
+
+**Version:** artwork unchanged since v1.10.7 · icon first shipped, and fixed, in v1.10.69
+**Reported by:** the maintainer, from a screenshot of the extracted folder (2026-09-24)
+
+**Symptom** - *"it looks very bad or corrupted"*. On the Desktop shortcut and
+in the launcher title bar the icon was a blurry blue blob with something
+indistinct inside it.
+
+**Cause** - the icon was rendered by shrinking `public/favicon.svg`, which is
+built for a browser tab and a 512px PWA tile: a #1e40af rounded square, a
+#2563eb rounded square inset 4px inside it, a white panel at 15% opacity, a
+26px letter and a 3px bar. At 16 pixels the two blues merge into a fuzzy
+edge, the panel becomes a grey ghost, the bar becomes a smudge, and the letter
+gets about six pixels of height. Nothing was corrupt; there was simply four
+times more detail than the canvas could hold.
+
+**Rule** - an icon is drawn at 16px far more often than at 256, so it is
+designed at 16px and allowed extra detail as it grows, not the other way
+round. Below 64px this one is a solid square and a single letter.
+
+**Rule (second)** - build the .ico out of uncompressed BGRA bitmaps, not PNGs.
+Windows 11 reads PNG-in-ICO, but .NET quietly hands back a smaller image when
+asked for a PNG-compressed 256 (observed here), and older shells skip such
+entries entirely. PNG is kept only for 256px, where a bitmap would be 256 KB.
+
+**Guard** - none automated (it is a judgement about legibility). Verified by
+rendering 16/24/32/48 from the shipped .ico, enlarging each with nearest-
+neighbour, and looking; and by asking the Windows shell itself, through
+SHGetFileInfo, what it draws for a shortcut and for the installed folder.
+
+---
+
+## ERR-022 - Every install re-downloaded 3.9 MB it already had
+
+**Version:** shipped with the packaged release since v1.10.33 · fixed in v1.10.69
+**Reported by:** the maintainer asking whether everything in the ZIP is really needed (2026-09-23)
+
+**Symptom** - during install, on a user machine, the console prints
+*"fetching eng.traineddata from jsDelivr..."* and pulls 3.9 MB down. The ZIP
+they just downloaded already contains that exact file.
+
+**Cause** - `bundle-tesseract-assets.mjs` is wired to `postinstall`, so it runs
+wherever `npm install` runs - including on the user machine. It rebuilds
+`public/tesseract/` from node_modules and downloads the English OCR data. In a
+source checkout that is right: `public/` is what `vite build` copies into
+`dist/`. In an installed copy it is pure waste - a release install serves
+`dist/`, and `dist/tesseract/` already holds all 18 files including the 3.9 MB
+language data. The download also added a network dependency, and a few more
+seconds, to an install that did not need either.
+
+**Rule** - a `postinstall` hook runs on every machine that installs the
+package, not just yours. Anything in it that only makes sense in a source
+checkout has to detect that it is in one. Here: a source checkout has
+`public/` (it is in git), an installed copy does not.
+
+**Guard** - none automated. Verified by hand: with `node_modules` present and
+`public/` renamed away - the exact shape of a release install - the script now
+prints "Installed copy - OCR files already ship in dist/. Nothing to do." and
+creates nothing.
+
+---
+
+## ERR-021 - The installer needed administrator rights it could never ask for
+
+**Version:** broke in v1.10.44, with the HTA launcher · fixed in v1.10.69
+**Reported by:** found while answering "can you confirm there will be no installation error" (2026-09-23)
+
+**Symptom** - on a PC without Node.js, the install appears to run and then
+stops with *"ERROR: npm install failed. See above."* Nothing above it explains
+anything. On a PC that already had Node.js, the same installer worked - so it
+looked fine in every test done on a developer machine.
+
+**Cause** - `install-windows.ps1` fetched the official Node.js **.msi** and ran
+`msiexec /i ... /qn`. That MSI installs per-machine into `C:\Program Files\`,
+which requires elevation, and `/qn` means fully silent - so Windows cannot even
+show the UAC prompt that would grant it. On a standard account it installed
+nothing. The exit code was never checked and `node -v` was never re-tested, so
+the script walked straight into `npm install`, which failed because npm did not
+exist, and reported that instead of the real cause.
+
+**Rule** - an installer for non-technical users asks for no privileges it
+cannot obtain, and a step that can fail is followed by a check that it did not.
+Node.js now comes from the official portable **.zip**, unpacked into
+`_system\node\`: no admin, no UAC, no registry, nothing written outside the app
+folder, and an existing system Node.js is left untouched and preferred.
+
+**Rule (second)** - the machine that builds the release already has every
+dependency, so it can never exercise the branch that installs them. Test the
+install with the dependency hidden.
+
+**Guard** - none automated (a real install takes three minutes and 30 MB).
+Verified by hand: extract the ZIP, run `install-windows.ps1` from a shell whose
+PATH has had every folder containing `node.exe` removed, and confirm
+`_system\node\node.exe` appears, `npm install` completes, and the app serves
+HTTP 200. Done 2026-09-23: 164 seconds, no prompts.
+
+---
+
+## ERR-020 - Launcher buttons ran edge to edge, touching both window sides
+
+**Version:** broke in v1.10.44, with the HTA launcher itself · fixed in v1.10.69
+**Reported by:** the maintainer, from a screenshot (2026-09-23)
+
+**Symptom** - every button in the launcher window stretched from the far left
+edge to the far right edge, with no margin at all, as if the stylesheet had
+not loaded.
+
+**Cause** - the buttons lived in `<main>`, styled `main { padding: 16px 24px }`.
+`<main>` is the one HTML5 sectioning element Internet Explorer never
+implemented - `<header>`, `<footer>`, `<section>` and `<nav>` all arrived in
+IE9, `<main>` never did. Trident treats it as an unknown inline element, so
+the padding was dropped and the full-width buttons sized against `<body>`. The
+same markup is correct in every other browser, which is why it read as fine in
+review.
+
+**Rule** - the HTA renders in Trident, not in a modern browser. Use `<div>` for
+layout containers there, and treat anything added to HTML after 2011 as absent
+until proven otherwise on the real engine. Screenshot the window; do not read
+the markup and assume.
+
+**Guard** - none automated (nothing can drive `mshta` headlessly). Verified by
+launching the packaged launcher in all three states and looking at each one.
+
+---
+
+## ERR-019 - "Update Now" and "Open GST Billing" did nothing at all, silently
+
+**Version:** broke in v1.10.44, when the HTA launcher replaced the .bat installer · fixed in v1.10.69
+**Reported by:** found while auditing the repo for stale install instructions (2026-09-23)
+
+**Symptom** - three buttons inside the app did nothing when clicked. No error,
+no window, no toast, no console message: **Settings → Check for Updates →
+Update Now**, the **Update Now** button in the update-available dialog, and
+**Open GST Billing** on the "server needs a quick start" screen.
+
+**Cause** - all three were `<a href="freegstbill://…">` links. Those custom URL
+protocols were registered in the Windows registry by the old
+`Install FreeGSTBill.bat`. The HTA launcher replaced that installer in v1.10.44
+and registers no protocol at all, so from that release on the links resolved to
+nothing. A browser silently ignores an unregistered protocol - there is no
+error to notice, which is why it survived 25 releases. The ⚙ Control Panel was
+unaffected: it posts to `/api/control-panel/launch-script`, which works.
+
+**Rule** - a click always produces a visible result: an action, or a message
+saying why not. Anything a page hands to the operating system - a custom
+protocol, a `mailto:`, a file association - can fail without telling anybody,
+so it is never the only path to a feature the app depends on. Where the app
+already has a server endpoint that does the job, use that.
+
+**Rule (second)** - when an installer is replaced, every registry key, protocol
+handler and shortcut the old one created is a dependency the new one silently
+dropped. List them and re-home each one before the old installer stops
+shipping.
+
+**Guard** - `scripts/build-release-zip.mjs` `assertNoDeadProtocolLinks()` scans
+the packaged `dist/` for `freegstbill:` and `freegstbill-update:` and refuses to
+build a ZIP that still contains either. Verified red: re-adding the string to
+`src/App.jsx` fails the build.
+
+---
+
 <!--
 Adding an entry? Copy this skeleton.
 

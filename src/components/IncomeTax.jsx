@@ -3,6 +3,7 @@ import { Calculator, Landmark, FileText, TrendingUp, Upload, Info, Check, X, Che
 import { getAllBills, getAllExpenses, getAllPurchases, getProfile } from '../store';
 import { formatCurrency } from '../utils';
 import { getPrintSettings } from '../utils/printSettings';
+import HelpButton from './HelpButton';
 
 // v1.10.31 — Parse the user's chosen PDF accent (hex like "#1e40af") into
 // a [r, g, b] tuple for jsPDF's setFillColor / setDrawColor. Falls back to
@@ -36,9 +37,19 @@ import {
   compute234CInterest,
   ADVANCE_TAX_SCHEDULE,
   buildITR4FieldMap,
+  effectiveDeductionCap,
   CURRENT_FY as ENGINE_FY,
 } from '../utils/itr.js';
-import { getFinancialYearLabel, belongsToProfile } from '../utils';
+import { getFinancialYearLabel, belongsToProfile, isCancelledBill, salesSign } from '../utils';
+
+// Business income is counted without GST (GST collected is not income, and GST
+// paid comes back as credit), in rupees only, from real sales: a quote or a
+// challan is not a sale and a credit note reduces sales.
+const billTurnover = (b) => ((b.currency || 'INR') === 'INR'
+  ? salesSign(b) * ((Number(b.totalAmount) || 0) - (Number(b.totalTaxAmount) || 0)) : 0);
+const purchaseCost = (p) => (p.taxableAmount != null ? Number(p.taxableAmount) || 0
+  : (Number(p.totalAmount) || 0) - (Number(p.totalTax) || 0));
+const expenseCost = (e) => (Number(e.amount) || 0) - (Number(e.gstAmount) || 0);
 import { toast } from './Toast';
 
 // The Income Tax module has three sub-tabs. Keeping them in one file (rather
@@ -101,10 +112,11 @@ export default function IncomeTax() {
       return {
         section: '44AD',
         digitalReceipts: 0, cashReceipts: 0, declaredIncome: 0,
-        heavyVehicleMonths: 0, heavyVehicleTonnage: 12, lightVehicleMonths: 0,
+        // v1.10.74 - default 13 t: a heavy vehicle is one over 12,000 kg.
+        heavyVehicleMonths: 0, heavyVehicleTonnage: 13, lightVehicleMonths: 0,
         ...saved,
       };
-    } catch { return { section: '44AD', digitalReceipts: 0, cashReceipts: 0, declaredIncome: 0, heavyVehicleMonths: 0, heavyVehicleTonnage: 12, lightVehicleMonths: 0 }; }
+    } catch { return { section: '44AD', digitalReceipts: 0, cashReceipts: 0, declaredIncome: 0, heavyVehicleMonths: 0, heavyVehicleTonnage: 13, lightVehicleMonths: 0 }; }
   });
 
   // Advance Tax state — TDS credit + payments made so far
@@ -124,7 +136,8 @@ export default function IncomeTax() {
     ]).then(([b, e, p, prof]) => {
       // v1.10.64 (#55) — income tax is filed per business, so only the active
       // business's invoices may contribute to its figures.
-      setBills((b || []).filter(bill => belongsToProfile(bill, prof)));
+      // v1.10.67 (#66 item 12) — cancelled invoices are not income.
+      setBills((b || []).filter(bill => belongsToProfile(bill, prof) && !isCancelledBill(bill)));
       // v1.10.66 (#64) — and only its own expenses and purchases. Left
       // unfiltered, one company's costs reduced another company's income.
       setExpenses((e || []).filter(r => belongsToProfile(r, prof)));
@@ -145,11 +158,11 @@ export default function IncomeTax() {
       const y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
       return `${y}-${String(y + 1).slice(-2)}` === CURRENT_FY;
     };
-    const sales = bills.filter(b => inFY(b.invoiceDate)).reduce((s, b) => s + (Number(b.totalAmount) || 0), 0);
-    const cogs  = purchases.filter(p => inFY(p.date)).reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+    const sales = bills.filter(b => inFY(b.invoiceDate)).reduce((s, b) => s + billTurnover(b), 0);
+    const cogs  = purchases.filter(p => inFY(p.date)).reduce((s, p) => s + purchaseCost(p), 0);
     const exps  = expenses.filter(e => inFY(e.date))
                           .filter(e => e.category !== 'Personal / Drawings' && e.category !== 'Asset Purchase')
-                          .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+                          .reduce((s, e) => s + expenseCost(e), 0);
     const estimated = Math.max(0, sales - cogs - exps);
     if (estimated > 0) {
       setInputs(prev => ({ ...prev, businessIncome: Math.round(estimated), _autofillHint: true }));
@@ -204,9 +217,18 @@ export default function IncomeTax() {
   return (
     <div className="dashboard-container">
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Income Tax Helper</h1>
-          <p className="page-subtitle">FY {CURRENT_FY} · AY {CURRENT_AY} — Old vs New Regime, bank-statement import, ITR summary</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div>
+            <h1 className="page-title">Income Tax Helper</h1>
+            <p className="page-subtitle">FY {CURRENT_FY} · AY {CURRENT_AY} — Old vs New Regime, bank-statement import, ITR summary</p>
+          </div>
+          <HelpButton title="Income tax — how to use" doc="income-tax">
+            <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
+              <li><strong>Regime Calculator</strong>: your income and deductions, old and new regime side by side.</li>
+              <li><strong>Presumptive</strong> (44AD / 44ADA / 44AE), <strong>Advance Tax</strong>, <strong>Bank Statement Import</strong> and the <strong>ITR Summary</strong> PDF.</li>
+              <li>Every figure is an estimate. Have your CA confirm it before filing.</li>
+            </ul>
+          </HelpButton>
         </div>
       </div>
 
@@ -276,6 +298,12 @@ export default function IncomeTax() {
           onPushToCalculator={() => {
             if (!presumptive) return;
             setInputs(prev => ({ ...prev, businessIncome: presumptive.presumptiveIncome }));
+            // v1.10.74 - 44AD / 44ADA pay advance tax in one go by 15 March, so tick
+            // that option on the Advance Tax tab too (still editable there). 44AE
+            // does not get the single-instalment rule, so it is left alone.
+            if (presumptiveInputs.section === '44AD' || presumptiveInputs.section === '44ADA') {
+              setAdvanceInputs(prev => ({ ...prev, mode: 'presumptive' }));
+            }
             setTab('calculator');
             toast(`Presumptive income of ${formatCurrency(presumptive.presumptiveIncome)} pushed to calculator`, 'success');
           }}
@@ -297,6 +325,14 @@ export default function IncomeTax() {
           bankImport={bankImport}
           setBankImport={setBankImport}
           onCommit={(totals) => {
+            // The push ADDS to the calculator, so the same statement must
+            // only go in once (pushing twice used to double every figure).
+            if (bankImport.pushed) {
+              toast('This statement is already in the calculator. Import it again to push a fresh copy.', 'info');
+              setTab('calculator');
+              return;
+            }
+            setBankImport(prev => ({ ...prev, pushed: true }));
             // Piping the categorised totals into the calculator — user
             // switches to the Calculator tab and their income + interest
             // + rent are pre-filled.
@@ -566,6 +602,14 @@ function AdvanceTaxTab({ advanceInputs, setAdvanceInputs, schedule, totalTax, re
 // ============================================================================
 function RegimeCalculatorTab({ inputs, setInputs, comparison, onReset }) {
   const set = (patch) => setInputs(prev => ({ ...prev, ...patch }));
+  // 80D and 80DDB limits depend on age: show the limit the calculation uses.
+  const effectiveCapLabel = (section, cap) => {
+    // v1.10.74 - 80TTA (under 60) / 80TTB (60+) also depend on age.
+    const c = ['80D', '80DDB', '80TTA', '80TTB'].includes(section)
+      ? effectiveDeductionCap(section, { selfSenior: Number(inputs.age) >= 60, parentsSenior: !!inputs.parentsSenior })
+      : cap;
+    return c === Infinity ? 'No cap' : formatCurrency(c);
+  };
   const setDed = (section, val) => setInputs(prev => ({
     ...prev,
     deductions: { ...prev.deductions, [section]: val },
@@ -582,14 +626,35 @@ function RegimeCalculatorTab({ inputs, setInputs, comparison, onReset }) {
           </button>
         </div>
 
+        {/* The engine's age slabs, 80D / 80DDB limits and the 14% 80CCD(2)
+            cap all depend on these; without them every user was treated as
+            under 60 with parents under 60. */}
+        <div style={{ display: 'grid', gap: '0.4rem', marginBottom: '0.75rem', fontSize: '0.82rem' }}>
+          <label className="form-label" style={{ marginBottom: 0 }}>Your age on 31 March
+            <select className="form-input" value={Number(inputs.age) >= 80 ? 80 : Number(inputs.age) >= 60 ? 60 : 0}
+              onChange={e => { const age = Number(e.target.value); set({ age, selfSenior: age >= 60 }); }}>
+              <option value={0}>Under 60</option>
+              <option value={60}>60 to 79 (senior citizen)</option>
+              <option value={80}>80 or older (super senior citizen)</option>
+            </select>
+          </label>
+          <label style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <input type="checkbox" checked={!!inputs.parentsSenior} onChange={e => set({ parentsSenior: e.target.checked })} />
+            My parents (whose health insurance I pay) are 60 or older
+          </label>
+          <label style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <input type="checkbox" checked={!!inputs.isGovtEmployee} onChange={e => set({ isGovtEmployee: e.target.checked })} />
+            I am a government employee
+          </label>
+        </div>
         <NumberInput label="Gross Salary (Form 16 box 1)" hint="Enter zero if you don't have salary income. Standard Deduction is applied automatically." value={inputs.salary} onChange={v => set({ salary: v })} />
         <NumberInput label="Business / Professional Income" hint={inputs._autofillHint ? '✨ Auto-filled from your invoices minus purchases + expenses this FY. Override if needed.' : 'Net profit from your books.'} value={inputs.businessIncome} onChange={v => set({ businessIncome: v, _autofillHint: false })} />
-        <NumberInput label="House Property (rent received)" hint="Enter net income AFTER 30% standard deduction and home-loan interest §24(b)." value={inputs.housePropertyIncome} onChange={v => set({ housePropertyIncome: v })} />
+        <NumberInput label="House Property (rent received)" hint="Rent received less municipal tax and the 30% standard deduction. Enter home-loan interest separately under §24b below." value={inputs.housePropertyIncome} onChange={v => set({ housePropertyIncome: v })} />
         <NumberInput label="Other Sources (bank interest, dividends, etc.)" hint="Includes savings-account interest; 80TTA claims that separately." value={inputs.otherSources} onChange={v => set({ otherSources: v })} />
 
         <h4 style={{ marginTop: '1rem', marginBottom: '0.5rem', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)' }}>Capital gains (special rates)</h4>
-        <NumberInput label="STCG on listed equity (§111A)" hint="Taxed flat at 15%. Excludes debt / property STCG (those go into slab)." value={inputs.stcgAtSpecialRate} onChange={v => set({ stcgAtSpecialRate: v })} />
-        <NumberInput label="LTCG on listed equity (§112A)" hint="₹1L exempt; balance taxed flat at 10%." value={inputs.ltcgAtSpecialRate} onChange={v => set({ ltcgAtSpecialRate: v })} />
+        <NumberInput label="STCG on listed equity (§111A)" hint="Taxed flat at 20%. Excludes debt / property STCG (those go into slab)." value={inputs.stcgAtSpecialRate} onChange={v => set({ stcgAtSpecialRate: v })} />
+        <NumberInput label="LTCG on listed equity (§112A)" hint="First ₹1.25 lakh exempt; the rest taxed flat at 12.5%." value={inputs.ltcgAtSpecialRate} onChange={v => set({ ltcgAtSpecialRate: v })} />
 
         <h4 style={{ marginTop: '1rem', marginBottom: '0.5rem', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)' }}>Deductions (Old Regime only)</h4>
         <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '0.5rem' }}>
@@ -599,11 +664,11 @@ function RegimeCalculatorTab({ inputs, setInputs, comparison, onReset }) {
         {Object.entries(DEDUCTION_CAPS).map(([section, cap]) => (
           <NumberInput key={section}
             label={`§${section}`}
-            hint={`Cap: ${cap === Infinity ? 'No cap' : formatCurrency(cap)} · ${SECTION_DESCRIPTIONS[section] || ''}`}
+            hint={`Cap: ${effectiveCapLabel(section, cap)} · ${SECTION_DESCRIPTIONS[section] || ''}`}
             value={inputs.deductions?.[section] || 0}
             onChange={v => setDed(section, v)} />
         ))}
-        <NumberInput label="§80CCD(2) — employer NPS" hint="Allowed under BOTH regimes. Typically 10% of salary (14% for govt)." value={inputs.deductions?.['80CCD2'] || 0} onChange={v => setDed('80CCD2', v)} />
+        <NumberInput label="§80CCD(2) — employer NPS" hint="Allowed under BOTH regimes, up to 10% of salary (14% for government employees)." value={inputs.deductions?.['80CCD2'] || 0} onChange={v => setDed('80CCD2', v)} />
       </div>
 
       {/* Right column: side-by-side comparison */}
@@ -629,7 +694,7 @@ function RegimeCalculatorTab({ inputs, setInputs, comparison, onReset }) {
             <Info size={16} style={{ flexShrink: 0, marginTop: 2, color: 'var(--primary)' }} />
             <div>
               <strong>How this is computed:</strong> slabs → §87A rebate → surcharge (income &gt; ₹50L) → 4% Health &amp; Ed Cess.
-              STCG (§111A) at 15%, LTCG (§112A) at 10% over ₹1L exempt.
+              STCG (§111A) at 20%, LTCG (§112A) at 12.5% over ₹1.25 lakh exempt.
               Numbers auto-save; refresh the page and they persist.
             </div>
           </div>
@@ -654,8 +719,8 @@ function RegimeCard({ title, result, highlighted, color }) {
       <Row label="Slab Tax" value={result.slabTax} />
       {(result.stcgTax > 0 || result.ltcgTax > 0) && (
         <>
-          <Row label="STCG (15%)" value={result.stcgTax} muted={!result.stcgTax} />
-          <Row label="LTCG (10%)" value={result.ltcgTax} muted={!result.ltcgTax} />
+          <Row label="STCG (20%)" value={result.stcgTax} muted={!result.stcgTax} />
+          <Row label="LTCG (12.5%)" value={result.ltcgTax} muted={!result.ltcgTax} />
         </>
       )}
       {result.rebate87A > 0 && <Row label="§87A Rebate" value={-result.rebate87A} />}
@@ -855,7 +920,7 @@ function SummaryTab({ bills, expenses, purchases, profile, comparison, inputs, p
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const tax = comparison[comparison.recommended];
       // Build the ITR-4 field map from all inputs
-      const rows = buildITR4FieldMap(inputs, tax, presumptive?.presumptiveIncome ? presumptive : null, inputs.deductions);
+      const rows = buildITR4FieldMap(inputs, tax, presumptive?.presumptiveIncome ? presumptive : null, inputs.deductions, profile?.pan);
 
       let y = 15;
       doc.setFontSize(16); doc.setFont('helvetica', 'bold');
@@ -946,9 +1011,9 @@ function SummaryTab({ bills, expenses, purchases, profile, comparison, inputs, p
   const fyExpenses = expenses.filter(e => inFY(e.date));
   const fyPurchases = purchases.filter(p => inFY(p.date));
 
-  const sales = fyBills.reduce((s, b) => s + (Number(b.totalAmount) || 0), 0);
-  const businessExpenses = fyExpenses.filter(e => e.category !== 'Personal / Drawings' && e.category !== 'Asset Purchase').reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  const trading = fyPurchases.reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+  const sales = fyBills.reduce((s, b) => s + billTurnover(b), 0);
+  const businessExpenses = fyExpenses.filter(e => e.category !== 'Personal / Drawings' && e.category !== 'Asset Purchase').reduce((s, e) => s + expenseCost(e), 0);
+  const trading = fyPurchases.reduce((s, p) => s + purchaseCost(p), 0);
   const assets = fyExpenses.filter(e => e.category === 'Asset Purchase').reduce((s, e) => s + (Number(e.amount) || 0), 0);
   const netBusiness = Math.max(0, sales - trading - businessExpenses);
 
@@ -960,7 +1025,7 @@ function SummaryTab({ bills, expenses, purchases, profile, comparison, inputs, p
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: '1rem' }}>
         <div className="stat-card">
           <div className="stat-icon stat-icon-blue"><TrendingUp size={22} /></div>
-          <div><p className="stat-label">Sales (FY {fy})</p><h2 className="stat-value">{formatCurrency(sales)}</h2></div>
+          <div><p className="stat-label">Sales excl. GST (FY {fy})</p><h2 className="stat-value">{formatCurrency(sales)}</h2></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon stat-icon-purple"><Landmark size={22} /></div>
@@ -1037,7 +1102,7 @@ function SummaryTab({ bills, expenses, purchases, profile, comparison, inputs, p
       </div>
 
       <div className="glass-panel p-4" style={{ marginTop: '1rem' }}>
-        <h3 className="section-title">Coming next in v1.9.0</h3>
+        <h3 className="section-title">Not included yet</h3>
         <ul style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0, paddingLeft: '1.2rem', lineHeight: 1.7 }}>
           <li><strong>Form 16 upload + parse</strong> — auto-extract salary + TDS + exemptions</li>
           <li><strong>Capital Gains module</strong> — Zerodha / Groww / ICICI Direct CSV import</li>

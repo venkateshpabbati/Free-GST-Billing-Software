@@ -62,6 +62,7 @@ async function cleanup(page) {
       await del('profiles');
       await del('expenses');
       await del('receipts');
+      await del('recurring');
       // The expense added through the form gets a generated id.
       const expenses = await (await fetch('/api/expenses')).json();
       await Promise.all((expenses || [])
@@ -140,6 +141,13 @@ const browser = await firefox.launch({ headless: true });
 // 1366x768 is the resolution the preview-clipping bug needed (ERR-005).
 // It is also the most common laptop size among this app's users.
 const ctx = await browser.newContext({ viewport: { width: 1366, height: 768 }, acceptDownloads: true });
+// Playwright gives a page 30 s to load. On a busy machine - another dev
+// server pinning three cores was enough - a reload under the release gate ran
+// past that and aborted the whole suite, twice in a row, with code that had
+// just passed 76/76. A timeout bounds how long we wait, not whether the page
+// is right, so it gets room; every assertion stays exactly as strict.
+ctx.setDefaultNavigationTimeout(120000);
+ctx.setDefaultTimeout(60000);
 const page = await ctx.newPage();
 
 const cspViolations = [];
@@ -735,6 +743,7 @@ try {
     await page.evaluate((draft) => {
       sessionStorage.setItem('gst_invoiceDraft', JSON.stringify(draft));
       sessionStorage.setItem('gst_currentView', 'new');
+      sessionStorage.removeItem('gst_editingBill');
     }, draft);
     await page.reload({ waitUntil: 'networkidle' });
     await sleep(2500);
@@ -868,6 +877,498 @@ try {
     await phone.close();
   }
 
+  // ======================================================================
+  // v1.10.67 — #66 (@sangwanmail-eng)
+  // ======================================================================
+  const salesCards = async () => {
+    await reopenView('Dashboard');
+    return { total: rupees(await cardValues('Total Invoiced')), count: money((await cardValues('Invoices'))?.[0]) };
+  };
+  const seedBill = (id, number, type, amount, extra = {}) => api('/api/bills', {
+    id, invoiceNumber: number, invoiceType: type, clientName: 'Smoke Test Client',
+    status: 'unpaid', totalAmount: amount, totalTaxAmount: 0, invoiceDate: today, payments: [], items: [],
+    data: {
+      profile: { gstin: TEST_GSTIN, businessName: 'Smoke Alpha', country: 'India', state: 'Punjab' },
+      client: { name: 'Smoke Test Client', state: 'Punjab', country: '' },
+      details: { invoiceNumber: number, invoiceDate: today },
+      items: [{ id: 'l1', name: 'Smoke line', hsn: '9983', quantity: 1, rate: amount, taxPercent: 0, discount: 0, unit: 'Pcs' }],
+      totals: { subtotal: amount, taxableAmount: amount, cgst: 0, sgst: 0, igst: 0, total: amount, isInterstate: false },
+      invoiceOptions: { showGST: false },
+    },
+    ...extra,
+  });
+
+  // ---- #66 item 7: only real sales count on the dashboard ----------------
+  const sales0 = await salesCards();
+  await seedBill('smoketest-quote', 'SMOKE-EST/9', 'proforma', 9999);
+  await seedBill('smoketest-challan', 'SMOKE-DC/9', 'delivery-challan', 8888);
+  const sales1 = await salesCards();
+  check('#66 a proforma and a delivery challan are not counted as sales',
+    close(sales1.total, sales0.total) && sales1.count === sales0.count,
+    `total ${sales0.total} -> ${sales1.total}, count ${sales0.count} -> ${sales1.count}`);
+  await seedBill('smoketest-sale', 'SMOKE-SALE/9', 'tax-invoice', 1000);
+  await seedBill('smoketest-cn', 'SMOKE-CN/9', 'credit-note', 400);
+  const sales2 = await salesCards();
+  check('#66 a sale adds and a credit note subtracts (sanity)',
+    close(sales2.total, sales0.total + 600) && sales2.count === sales0.count + 2,
+    `total ${sales0.total} -> ${sales2.total}, count ${sales0.count} -> ${sales2.count}`);
+
+  // ---- #66 item 10: the short columns are centred -------------------------
+  const aligned = await page.evaluate(() => {
+    const head = [...document.querySelectorAll('th')];
+    const pick = (label) => head.find((h) => h.textContent.trim() === label);
+    const align = (el) => (el ? getComputedStyle(el).textAlign : null);
+    return { type: align(pick('Type')), paid: align(pick('Paid')), status: align(pick('Status')), client: align(pick('Client')) };
+  });
+  check('#66 Type, Paid and Status are centred; Client stays left',
+    aligned.type === 'center' && aligned.paid === 'center' && aligned.status === 'center' && aligned.client !== 'center',
+    JSON.stringify(aligned));
+
+  // ---- #66 item 11: the type is locked once the invoice is saved ---------
+  await seedBill('smoketest-cancel', 'SMOKE-CANCEL/9', 'tax-invoice', 5000);
+  await reopenView('Dashboard');
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('tr')].find((r) => r.innerText.includes('SMOKE-CANCEL/9'));
+    const btn = row && [...row.querySelectorAll('button')].find((b) => (b.title || '') === 'Edit');
+    if (btn) btn.click();
+  });
+  await page.waitForSelector('#invoice-preview', { timeout: 20000 });
+  await sleep(1500);
+  const chips = await page.evaluate(() => {
+    const all = [...document.querySelectorAll('.type-selector .type-chip')];
+    return {
+      total: all.length,
+      disabled: all.filter((c) => c.disabled).length,
+      active: all.filter((c) => c.className.includes('type-chip-active')).length,
+    };
+  });
+  check('#66 the invoice type cannot be changed on a saved invoice',
+    chips.total > 1 && chips.disabled === chips.total - 1 && chips.active === 1, JSON.stringify(chips));
+  check('#66 the "Billing From" card is gone from the invoice screen',
+    !(await screenText()).includes('Billing From'));
+
+  await openView('Dashboard');
+  const leave = page.getByRole('button', { name: /Discard.*leave/i });
+  if (await leave.count()) { await leave.click(); await sleep(1500); }
+
+  // ---- #66 item 12: cancelling keeps the invoice, out of the totals ------
+  const beforeCancel = await salesCards();
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('tr')].find((r) => r.innerText.includes('SMOKE-CANCEL/9'));
+    const btn = row && [...row.querySelectorAll('button')].find((b) => /Cancel invoice/i.test(b.title || ''));
+    if (btn) btn.click();
+  });
+  await sleep(900);
+  const confirmCancel = page.getByRole('button', { name: /^Cancel invoice$/ });
+  if (await confirmCancel.count()) await confirmCancel.first().click();
+  await sleep(2500);
+  const afterCancel = await salesCards();
+  const cancelledRow = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('tr')].find((r) => r.innerText.includes('SMOKE-CANCEL/9'));
+    if (!row) return null;
+    const status = row.querySelector('select.status-select');
+    return { listed: true, status: status ? status.value : null };
+  });
+  check('#66 a cancelled invoice drops out of the sales totals',
+    close(afterCancel.total, beforeCancel.total - 5000) && afterCancel.count === beforeCancel.count - 1,
+    `total ${beforeCancel.total} -> ${afterCancel.total}`);
+  check('#66 the cancelled invoice is still listed, marked Cancelled',
+    cancelledRow?.listed === true && cancelledRow.status === 'cancelled', JSON.stringify(cancelledRow));
+  const cancelledStatus = await page.evaluate(async () =>
+    (await (await fetch('/api/bills')).json()).find((b) => b.id === 'smoketest-cancel')?.status ?? null);
+  check('#66 the invoice itself is kept, not deleted', cancelledStatus === 'cancelled', `status=${cancelledStatus}`);
+
+  // ---- #66 item 2: a new product starts in Pcs ---------------------------
+  await reopenView('Products');
+  await page.getByRole('button', { name: /Add Product/i }).first().click();
+  await sleep(900);
+  const unitValue = await page.evaluate(() => {
+    const sel = [...document.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'Pcs'));
+    return sel ? sel.value : null;
+  });
+  check('#66 a new product defaults to Pcs', unitValue === 'Pcs', `unit=${unitValue}`);
+  await page.getByRole('button', { name: /^Cancel$/ }).first().click();
+  await sleep(800);
+
+  // ---- #66 item 8: the sidebar follows the theme -------------------------
+  const sidebarTone = async () => page.evaluate(() => {
+    const rgb = (getComputedStyle(document.querySelector('.sidebar')).backgroundColor.match(/[0-9.]+/g) || []).map(Number);
+    return (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+  });
+  const toggleTheme = async (label) => {
+    await page.evaluate((label) => {
+      const b = [...document.querySelectorAll('.sidebar .nav-btn')].find((x) => x.innerText.trim() === label);
+      if (b) b.click();
+    }, label);
+    await sleep(900);
+  };
+  const themeNow = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+  if (themeNow === 'dark') await toggleTheme('Light Mode');
+  const lightTone = await sidebarTone();
+  await toggleTheme('Dark Mode');
+  const darkTone = await sidebarTone();
+  check('#66 the sidebar is light in Light Mode and dark in Dark Mode',
+    lightTone > 0.7 && darkTone < 0.3, `light=${lightTone.toFixed(2)} dark=${darkTone.toFixed(2)}`);
+  await toggleTheme('Light Mode');
+
+  // ---- #66 item 13: the stamp prints beside the signature ----------------
+  const onePixelPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await page.evaluate(async ({ png }) => {
+    const prof = await (await fetch('/api/profile')).json();
+    await fetch('/api/profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...prof, stamp: png, stampHeight: 70, signature: png, signatureHeight: 55 }),
+    });
+  }, { png: onePixelPng });
+  await openDraft({
+    invoiceType: 'tax-invoice',
+    client: { name: 'Smoke Test Client', address: '', city: '', pin: '', state: 'Punjab', gstin: '', country: '', email: '', phone: '', isSEZ: false },
+    details: { invoiceNumber: 'SMOKE-STAMP/1', invoiceDate: today, placeOfSupply: 'Punjab' },
+    items: draftItems,
+    taxInclusive: false,
+  });
+  const stampShown = await page.evaluate(() => {
+    const box = document.querySelector('#invoice-preview .inv-signature');
+    if (!box) return null;
+    const stamp = box.querySelector('img[alt="Stamp"]');
+    const sig = box.querySelector('img[alt="Signature"]');
+    return { stamp: !!stamp, sig: !!sig, stampHeight: stamp ? Math.round(stamp.getBoundingClientRect().height) : 0 };
+  });
+  check('#66 the stamp prints next to the signature', !!stampShown?.stamp && !!stampShown?.sig, JSON.stringify(stampShown));
+
+  // ---- #66 item 9: Settings always shows one Save at the top -------------
+  await openView('Settings');
+  await sleep(2000);
+  const saveBar = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('button')].find((b) => /Save Profile/i.test(b.innerText));
+    if (!btn) return null;
+    const bar = btn.closest('div[style*="sticky"]');
+    return { hasButton: true, sticky: !!bar, top: bar ? Math.round(bar.getBoundingClientRect().top) : null };
+  });
+  check('#66 Settings keeps one Save button pinned at the top',
+    !!saveBar?.hasButton && !!saveBar?.sticky && saveBar.top < 200, JSON.stringify(saveBar));
+
+  // ---- #68: a GSTIN fills in the state, offline -------------------------
+  await openDraft({
+    invoiceType: 'tax-invoice',
+    client: { name: 'Smoke GSTIN Client', address: '', city: '', pin: '', state: '', gstin: '', country: 'India', email: '', phone: '', isSEZ: false },
+    details: { invoiceNumber: 'SMOKE-GSTIN/1', invoiceDate: today },
+    items: draftItems,
+    taxInclusive: false,
+  });
+  const billedTo = page.locator('.glass-panel').filter({ has: page.locator('h3.section-title', { hasText: 'Billed To' }) });
+  const fieldGroup = (label) => billedTo.locator('.form-group').filter({ has: page.locator(`label.form-label:text-is("${label}")`) });
+  const gstinInput = fieldGroup('GSTIN').locator('input');
+  await gstinInput.fill('27AAPFU0939F1ZV');
+  await page.keyboard.press('Tab');
+  await sleep(600);
+  const filledState = await fieldGroup('State').locator('select, input').inputValue();
+  check('#68 a valid GSTIN fills the client state from its first two digits',
+    filledState === 'Maharashtra', `state=${filledState}`);
+
+  await gstinInput.fill('27AAPFU0939F1ZW');
+  await page.keyboard.press('Tab');
+  await sleep(600);
+  const typoWarning = (await fieldGroup('GSTIN').locator('small').allInnerTexts()).join(' ');
+  check('#68 a mistyped GSTIN is caught by its own checksum',
+    /checksum/i.test(typoWarning), typoWarning || 'no warning shown');
+
+  // ---- v1.10.69: the getting-started checklist -------------------------
+  // It has to read the real saved data, not "have you seen this screen",
+  // and it has to retire itself once there is nothing left to do.
+  await page.evaluate(() => { try { localStorage.removeItem('freegstbill_startedDismissed'); } catch { /* private mode */ } });
+  const setBank = async (withBank) => {
+    await page.evaluate(async ({ withBank, prof }) => {
+      const body = { ...prof };
+      if (withBank) { body.paymentAccounts = [{ id: 'smk', label: 'Test', bankName: 'Test Bank', accountNumber: '1', ifsc: 'X', isDefault: true, isActive: true }]; body.upiId = 'x@y'; }
+      else { body.paymentAccounts = []; body.upiId = ''; body.accountNumber = ''; }
+      await fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    }, { withBank, prof: originalProfile });
+    // The app holds the business profile in React state and only fetches it
+    // on load, so a POST made behind its back is invisible until a reload.
+    // (In real use, saving in Settings updates that state directly.)
+    await page.reload({ waitUntil: 'networkidle' });
+    await sleep(2500);
+    await openView('Dashboard');
+  };
+  const checklist = () => page.evaluate(() => {
+    const head = [...document.querySelectorAll('.section-title')].find((h) => h.innerText.trim() === 'Getting started');
+    if (!head) return null;
+    const card = head.closest('.glass-panel');
+    return { shown: true, text: card.innerText.replace(/\s+/g, ' ') };
+  });
+
+  await setBank(false);
+  const noBank = await checklist();
+  check('v1.10.69 the getting-started card is shown while something is still to do',
+    !!noBank && /Add bank details or UPI/.test(noBank.text),
+    noBank ? noBank.text.slice(0, 140) : 'card not shown');
+
+  await setBank(true);
+  const withBank = await checklist();
+  const doneOf = (c) => (c ? Number((c.text.match(/(\d) of 4 done/) || [0, -1])[1]) : 4);
+  check('v1.10.69 it ticks itself off from the saved data, not from having been seen',
+    doneOf(withBank) === doneOf(noBank) + 1,
+    `without bank ${doneOf(noBank)}/4, with bank ${doneOf(withBank)}/4`);
+
+  // ---- #71 (@sangwanmail-eng) -------------------------------------------
+  // 1. Customize belongs in the sticky toolbar, right before Show Preview.
+  await openDraft({
+    invoiceType: 'tax-invoice',
+    client: { name: 'Smoke 71 Client', address: '', city: '', pin: '', state: 'Punjab', gstin: '', country: 'India', email: '', phone: '', isSEZ: false },
+    details: { invoiceNumber: 'SMOKE-71/1', invoiceDate: today },
+    items: draftItems,
+    taxInclusive: false,
+  });
+  const bar71 = await page.evaluate(() => {
+    const el = document.querySelector('.generator-toolbar');
+    return el ? [...el.querySelectorAll('button')].map((b) => b.innerText.trim().replace(/\s+/g, ' ')).filter(Boolean) : null;
+  });
+  const cIdx = bar71 ? bar71.findIndex((t) => /Customize|Hide Options/.test(t)) : -1;
+  const pIdx = bar71 ? bar71.findIndex((t) => /Show Preview|Hide Preview/.test(t)) : -1;
+  check('#71.1 Customize sits in the toolbar, immediately before the preview button',
+    cIdx !== -1 && pIdx === cIdx + 1, JSON.stringify(bar71));
+  const cCount = await page.evaluate(() =>
+    [...document.querySelectorAll('button')].filter((b) => /^(Customize|Hide Options)$/.test(b.innerText.trim())).length);
+  check('#71.1 and there is only one of it', cCount === 1, `found ${cCount}`);
+
+  // 2. Qty / Rate / Cess replace their contents when you click and type.
+  await openView('Purchases');
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('button')].find((x) => /Add Purchase/i.test(x.innerText));
+    if (b) b.click();
+  });
+  await sleep(2500);
+  for (const label of ['Qty', 'Rate', 'Cess %']) {
+    const field = page.locator(`.form-group:has(.form-label:text-is("${label}")) input[type=number]`).first();
+    const was = await field.inputValue();
+    await field.click();
+    await page.keyboard.type('7');
+    const now = await field.inputValue();
+    // selectionStart is null on <input type=number>, so ask what a user sees.
+    check(`#71.2 typing in ${label} replaces what was there`, now === '7', `was "${was}", got "${now}"`);
+  }
+
+  // 3. The Status column is a dropdown that saves, like the Dashboard.
+  await openView('Purchases');
+  const st71 = await page.evaluate(() => {
+    const heads = [...document.querySelectorAll('th')].map((th) => th.textContent.trim().toLowerCase());
+    const idx = heads.indexOf('status');
+    const row = document.querySelector('tbody tr');
+    if (idx === -1 || !row) return { idx, rows: 0 };
+    const sel = row.children[idx]?.querySelector('select');
+    // Which purchase is this row? The list is filtered and sorted, so the
+    // first row is not necessarily the one this suite created.
+    const invIdx = heads.indexOf('invoice no');
+    const invoiceNumber = invIdx === -1 ? null : row.children[invIdx].innerText.trim();
+    return { idx, invoiceNumber, isSelect: !!sel, value: sel?.value, options: sel ? [...sel.options].map((o) => o.value) : null };
+  });
+  check('#71.3 the Status column is a dropdown offering Unpaid / Paid / Partial',
+    st71.isSelect === true && JSON.stringify(st71.options) === JSON.stringify(['Unpaid', 'Paid', 'Partial']),
+    JSON.stringify(st71));
+  if (st71.isSelect) {
+    await page.evaluate((idx) => {
+      const sel = document.querySelector('tbody tr').children[idx].querySelector('select');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(sel, 'Paid');
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }, st71.idx);
+    await sleep(2500);
+    const saved71 = await page.evaluate(async (invoiceNumber) => {
+      const rows = await (await fetch('/api/purchases')).json();
+      const r = rows.find((x) => String(x.invoiceNumber).trim() === invoiceNumber);
+      return r ? r.paymentStatus : null;
+    }, st71.invoiceNumber);
+    check('#71.3 changing it saves against the purchase', saved71 === 'Paid',
+      `invoice ${st71.invoiceNumber} saved as "${saved71}"`);
+  }
+
+  // ---- ERR-024: a page break must never cut through the signature --------
+  // Reported with a photo: the stamp printed half at the foot of page 1 and
+  // half at the top of page 2. The footer is two columns - bank details and
+  // terms on the left, signature and stamp on the right - and the paginator
+  // broke at the gap between bank details and terms, which runs straight
+  // through the stamp. This builds that exact invoice: it adds item rows until
+  // the page-1 seam falls between the bottom of the bank-details block and the
+  // bottom of the signature block (the only window in which the old code cut
+  // the stamp), makes a real PDF, and checks where the page actually ended.
+  const tallStamp = await page.evaluate(() => {
+    const c = document.createElement('canvas'); c.width = 100; c.height = 300;
+    const g = c.getContext('2d');
+    g.strokeStyle = '#1d4ed8'; g.lineWidth = 8;
+    g.strokeRect(8, 8, 84, 284);
+    return c.toDataURL('image/png');
+  });
+  await page.evaluate(async ({ png, prof }) => {
+    await fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...prof, stamp: png, stampHeight: 160, signature: png, signatureHeight: 90,
+        bankName: prof.bankName || 'Smoke Bank', accountNumber: prof.accountNumber || '000111222333',
+        ifsc: prof.ifsc || 'SMOK0000001' }) });
+  }, { png: tallStamp, prof: originalProfile });
+  const seamDraft = (n) => ({
+    invoiceType: 'tax-invoice',
+    client: { name: 'Smoke Test Client', address: '', city: '', pin: '', state: 'Punjab', gstin: '', country: 'India', email: '', phone: '', isSEZ: false },
+    details: { invoiceNumber: `SMOKE-SEAM/${n}`, invoiceDate: today, placeOfSupply: 'Punjab' },
+    items: Array.from({ length: n }, (_, i) => ({ ...draftItems[0], id: `smk-seam-${i}`, name: `Seam item ${i + 1}` })),
+    taxInclusive: false,
+    customTerms: '<p>1. Goods once sold will not be taken back.</p><p>2. Subject to local jurisdiction.</p><p>3. Payment is due within 15 days.</p>',
+  });
+  const pdfLayout = async (n) => {
+    await openDraft(seamDraft(n));
+    await page.evaluate(() => { window.__lastPdfLayout = null; });
+    try {
+      await Promise.all([
+        page.waitForEvent('download', { timeout: 90_000 }),
+        page.getByRole('button', { name: /save & download/i }).first().click(),
+      ]);
+    } catch { /* judged below */ }
+    await sleep(800);
+    return page.evaluate(() => window.__lastPdfLayout);
+  };
+  // The danger window: a real multi-page PDF (the invoice is taller than one
+  // page), with the page-1 seam below the bank-details block but above the
+  // bottom of the signature block beside it.
+  const inWindow = (L) => !!(L && L.signature && L.blocks?.length
+    && L.total > L.fullHeight + 2
+    && L.blocks[0][1] < L.pageHeight && L.pageHeight < L.signature[1]);
+
+  const probe = await pdfLayout(1);
+  let seam = null;
+  if (probe?.signature && probe.blocks?.length && probe.rowHeight > 0) {
+    // Aim the seam just under the bank-details block: that leaves the most of
+    // the invoice below it, which is what makes the PDF spill onto page 2.
+    const k0 = Math.max(0, Math.floor((probe.pageHeight - 12 - probe.blocks[0][1]) / probe.rowHeight));
+    for (const k of [k0, k0 - 1, k0 + 1, k0 - 2]) {
+      if (k < 0) continue;
+      const L = await pdfLayout(1 + k);
+      if (inWindow(L)) { seam = { ...L, items: 1 + k }; break; }
+    }
+  }
+  check('ERR-024 test setup: the page seam lands inside the signature block (the case that broke)',
+    !!seam, seam ? `${seam.items} items, seam at ${Math.round(seam.pageHeight)}px, signature ${seam.signature.map(Math.round).join('-')}px`
+      : `could not place it - probe ${JSON.stringify(probe && { H: probe.pageHeight, full: probe.fullHeight, total: probe.total, row: probe.rowHeight, sig: probe.signature, first: probe.blocks?.[0] })}`);
+  if (seam) {
+    const cutInto = seam.ends.filter((e) => seam.atoms.some(([a, b]) => e > a + 1 && e < b - 1));
+    check('ERR-024 no PDF page ends inside the signature, stamp or any image',
+      seam.ends.length > 0 && cutInto.length === 0,
+      `page ends at ${seam.ends.map(Math.round).join(', ')}px${cutInto.length ? ` - CUTS THROUGH at ${cutInto.map(Math.round).join(', ')}` : ''}`);
+  }
+
+  // ---- v1.10.73: Boxed grid and Tally style designs ----------------------
+  // Chosen through Customize, the way a person does it. The choice is saved
+  // as the default for new invoices, so it is put back to Classic at the end.
+  const pickStyle = async (label) => {
+    const custom = page.getByRole('button', { name: /^customize$/i }).first();
+    if (await custom.count()) { await custom.click(); await sleep(700); }
+    await page.locator('button.type-chip', { hasText: label }).first().click();
+    await sleep(1500); // display options save after 800 ms
+    const hide = page.getByRole('button', { name: /hide options/i }).first();
+    if (await hide.count()) { await hide.click(); await sleep(400); }
+  };
+  await openDraft(seamDraft(1));
+  await pickStyle('Tally style');
+  const TL = await pdfLayout(45);
+  const tallyText = await page.locator('#invoice-preview').innerText().catch(() => '');
+  check('v73 Tally style prints the HSN/SAC tax summary, the declaration and the seal box',
+    /Total Tax Amount/i.test(tallyText) && /Declaration/i.test(tallyText) && /Customer.s Seal and Signature/i.test(tallyText)
+      && /Amount Chargeable \(in words\)/i.test(tallyText),
+    tallyText ? '' : 'preview had no text');
+  {
+    const ok = !!(TL && TL.total > TL.fullHeight + 2 && TL.ends.length > 0);
+    const cutInto = ok ? TL.ends.filter((e) => TL.atoms.some(([a, b]) => e > a + 1 && e < b - 1)) : [];
+    check('v73 Tally style: a 45-item invoice runs onto more pages and no page ends inside a row, block or the signature',
+      ok && cutInto.length === 0,
+      ok ? `page ends at ${TL.ends.map(Math.round).join(', ')}px${cutInto.length ? ` - CUTS THROUGH at ${cutInto.map(Math.round).join(', ')}` : ''}`
+        : `no multi-page PDF: ${JSON.stringify(TL && { total: TL.total, full: TL.fullHeight })}`);
+  }
+  await pickStyle('Boxed grid');
+  await openDraft(seamDraft(1));
+  const boxedRows = await page.locator('#invoice-preview table.grid-items tbody tr').count();
+  const boxedText = await page.locator('#invoice-preview').innerText().catch(() => '');
+  check('v73 Boxed grid fills the item table to a fixed height and prints Grand Total',
+    boxedRows >= 8 && /Grand Total/.test(boxedText), `${boxedRows} rows`);
+  await pickStyle('Classic');
+
+  // ---- #72: "system-generated, no signature required" note ----------------
+  // Driven through Customize, the way a person turns it on. (Options passed in
+  // a draft are replaced by the server-saved display options on load.)
+  await openDraft({ ...seamDraft(1), details: { invoiceNumber: 'SMOKE-72/1', invoiceDate: today, placeOfSupply: 'Punjab' } });
+  const notePos = () => page.evaluate(() => {
+    const t = document.querySelector('#invoice-preview')?.innerText || '';
+    return { note: t.search(/system-generated invoice/i), terms: t.search(/terms/i) };
+  });
+  const off72 = await notePos();
+  check('#72 the system-generated note is off unless chosen', off72.note === -1, JSON.stringify(off72));
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.generator-toolbar button')].find((x) => /^Customize$/.test(x.innerText.trim()));
+    if (b) b.click();
+  });
+  await sleep(1000);
+  const box72 = page.locator('label.option-toggle', { hasText: /system-generated invoice/i }).locator('input[type=checkbox]');
+  const shownTicked = (await box72.count()) ? await box72.isChecked() : null;
+  check('#72 its Customize box shows unticked while the note is off', shownTicked === false, `ticked=${shownTicked}`);
+  if (await box72.count()) { await box72.click(); await sleep(1000); }
+  const on72 = await notePos();
+  check('#72 ticking it prints the note below the Terms & Conditions',
+    on72.note !== -1 && on72.terms !== -1 && on72.note > on72.terms, JSON.stringify(on72));
+  // Untick it again: display options are saved, and this must not leak.
+  if (await box72.count() && await box72.isChecked()) { await box72.click(); await sleep(2500); }
+
+  // ---- v1.10.72 (#73): the Control Panel finds its scripts ---------------------
+  // The release ZIP puts them next to server.js in _system/; the server looked
+  // only in _system-scripts folders, so every ZIP install reported "Launcher
+  // scripts not detected" and Update / Backup failed. Status only: the suite
+  // must never actually run an update or a backup.
+  const cp = await page.evaluate(async () => (await fetch('/api/control-panel/status')).json());
+  check('#73 the Control Panel finds its update and backup scripts',
+    cp.controlScriptsAvailable === true && cp.actions?.update === true && cp.actions?.backup === true,
+    JSON.stringify({ available: cp.controlScriptsAvailable, actions: cp.actions }));
+  if (cp.platform === 'win32') {
+    check('#73 on Windows every Control Panel action has its script',
+      ['update', 'backup', 'restore', 'move', 'stop'].every((k) => cp.actions?.[k] === true), JSON.stringify(cp.actions));
+  }
+
+  // ---- v1.10.71: Generate Now uses the server's full invoice maths ---------
+  // It used to do its own simplified maths in the browser (no CGST/SGST/IGST
+  // split, interval and end conditions ignored). A delivery challan is used so
+  // the suite never takes a tax-invoice number from the real series.
+  const gen = await page.evaluate(async () => {
+    const prof = await (await fetch('/api/profile')).json();
+    await fetch('/api/recurring', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      id: 'smoketest-rec', clientName: 'Smoke Test Client', clientState: prof.state || 'Karnataka',
+      frequency: 'monthly', interval: 2, nextDate: '2099-01-01', invoiceType: 'delivery-challan', active: false,
+      items: [{ name: 'Smoke recurring item', quantity: 2, rate: 100, taxPercent: 18 }],
+      invoiceOptions: { showGST: true },
+    }) });
+    const r = await fetch('/api/recurring/smoketest-rec/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const out = await r.json();
+    const bill = out.invoiceNumber ? (await (await fetch('/api/bills')).json()).find((b) => b.id === out.invoiceNumber) : null;
+    const tpl = (await (await fetch('/api/recurring')).json()).find((t) => t.id === 'smoketest-rec');
+    return { ok: r.ok, invoiceNumber: out.invoiceNumber, totals: bill?.data?.totals || null, nextDate: tpl?.nextDate, count: tpl?.occurrencesCreated };
+  });
+  check('v71 Generate Now makes the invoice even for a paused template', gen.ok && !!gen.invoiceNumber, JSON.stringify(gen));
+  check('v71 Generate Now works the tax out properly (split into CGST+SGST or IGST)',
+    !!gen.totals && Math.abs((gen.totals.cgst || 0) + (gen.totals.sgst || 0) + (gen.totals.igst || 0) - 36) < 0.01, JSON.stringify(gen.totals));
+  check('v71 Generate Now honours "every 2 months" and counts the invoice',
+    gen.nextDate === '2099-03-01' && gen.count === 1, `${gen.nextDate} / ${gen.count}`);
+
+  // ---- v1.10.71: Bulk PDF on the Dashboard ----------------------------------
+  // The button passed its click event where the ticked invoices belonged, so
+  // it always said "Could not generate any PDFs".
+  if (gen.invoiceNumber) {
+    await openView('Dashboard');
+    await page.fill('input[placeholder="Search client or invoice..."]', gen.invoiceNumber);
+    await sleep(800);
+    const row = page.locator('tr', { hasText: gen.invoiceNumber }).first();
+    await row.locator('input[type="checkbox"]').check();
+    const [dl] = await Promise.all([
+      page.waitForEvent('download', { timeout: 60000 }).catch(() => null),
+      page.locator('button', { hasText: 'Bulk PDF' }).first().click(),
+    ]);
+    check('v71 Bulk PDF downloads a PDF of the ticked invoices', !!dl && /\.pdf$/i.test(dl.suggestedFilename()), dl ? dl.suggestedFilename() : 'no download');
+    await page.fill('input[placeholder="Search client or invoice..."]', '');
+  }
+
   // Put the real business details back.
   await page.evaluate(async (prof) => {
     await fetch('/api/profile', {
@@ -882,6 +1383,11 @@ try {
   // a guessing game.
   const detail = err.message.split('\n').filter((l) => l.trim()).slice(0, 4).join(' | ');
   check('suite ran to completion', false, detail);
+  // A screenshot of the moment it stopped, when asked for: a timeout says
+  // what was awaited, not what was on screen instead (a dialog in the way?).
+  if (process.env.SMOKE_FAIL_SHOT) {
+    try { await page.screenshot({ path: process.env.SMOKE_FAIL_SHOT, fullPage: true }); } catch { /* best effort */ }
+  }
   try { await cleanup(page); } catch { /* ignore */ }
 } finally {
   if (profileAtStart) {

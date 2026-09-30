@@ -229,6 +229,10 @@ export function effectiveDeductionCap(section, ctx = {}) {
   if (s === '80DDB') {
     return ctx.selfSenior ? 100_000 : 40_000;
   }
+  // v1.10.74 - 80TTA is only for under-60s and 80TTB only for 60+, so the
+  // two can never both be claimed.
+  if (s === '80TTA') return ctx.selfSenior ? 0 : DEDUCTION_CAPS['80TTA'];
+  if (s === '80TTB') return ctx.selfSenior ? DEDUCTION_CAPS['80TTB'] : 0;
   return DEDUCTION_CAPS[section] ?? Infinity;
 }
 
@@ -406,7 +410,7 @@ export function computeAllowedDeductions(userDeductions = {}, regime = 'old', ct
   let total = 0;
   for (const section of Object.keys(DEDUCTION_CAPS)) {
     const claimed = Number(userDeductions[section]) || 0;
-    // Use effectiveDeductionCap for context-sensitive sections (80D, 80DDB).
+    // Use effectiveDeductionCap for context-sensitive sections (80D, 80DDB, 80TTA/80TTB).
     const cap = effectiveDeductionCap(section, ctx);
     total += Math.min(claimed, cap);
   }
@@ -423,8 +427,8 @@ export function computeAllowedDeductions(userDeductions = {}, regime = 'old', ct
  * @param {number} inputs.housePropertyIncome — rent minus 30% standard deduction minus §24(b) home-loan interest
  * @param {number} inputs.capitalGains — realised gains (STCG/LTCG treated at their own rates below)
  * @param {number} inputs.otherSources — bank interest, dividends, etc.
- * @param {number} inputs.stcgAtSpecialRate — STCG on listed equity (15% flat)
- * @param {number} inputs.ltcgAtSpecialRate — LTCG on listed equity (10% over ₹1L, exempt below)
+ * @param {number} inputs.stcgAtSpecialRate — STCG on listed equity (20% flat)
+ * @param {number} inputs.ltcgAtSpecialRate — LTCG on listed equity (12.5% over ₹1.25L, exempt below)
  * @param {object} inputs.deductions   — { '80C': 150000, '80D': 25000, ... }
  * @param {'old'|'new'} inputs.regime
  * @returns {object} breakdown
@@ -554,6 +558,9 @@ export function compareRegimes(inputs) {
 export const AUTO_CATEGORY_RULES = [
   { pattern: /\bsalary|sal\b|payroll/i,                         category: 'salary' },
   { pattern: /\bint\b|interest|savings interest|sb\s*int/i,     category: 'interest' },
+  // Rent PAID is checked before rent received: "office rent" also contains
+  // "rent", and the first matching rule wins.
+  { pattern: /\brent paid|office rent/i,                        category: 'business_out' },
   { pattern: /\brent\b|rental/i,                                category: 'rent_received' },
   { pattern: /\bsip\b|mutual fund|elss|mf\b/i,                  category: 'investment' },
   { pattern: /\bppf|nps\b/i,                                    category: 'investment' },
@@ -561,7 +568,6 @@ export const AUTO_CATEGORY_RULES = [
   { pattern: /health insurance|mediclaim/i,                     category: 'deduction_80D' },
   { pattern: /\bgst\b|cgst|sgst|igst/i,                         category: 'gst_paid' },
   { pattern: /\bemi\b|home loan|housing loan/i,                 category: 'business_out' },
-  { pattern: /\brent paid|office rent/i,                        category: 'business_out' },
   { pattern: /electric|utility|broadband|internet|telephone/i,  category: 'business_out' },
   { pattern: /aws|amazon web|azure|google cloud|adobe|figma/i,  category: 'business_out' },
   { pattern: /amazon|flipkart|swiggy|zomato/i,                  category: 'personal' },
@@ -859,7 +865,8 @@ export function compute44AD({ digitalReceipts = 0, cashReceipts = 0, declaredInc
   if (!isEligible) {
     notes.push(`Turnover of ${formatINR(turnover)} exceeds the §44AD limit of ${formatINR(threshold)}. You must maintain regular books and file ITR-3 with a Tax Audit Report (§44AB).`);
   }
-  if (cashPct > 0.05 && turnover <= 30_000_000) {
+  // v1.10.74 - the cash share only matters once turnover is above ₹2Cr.
+  if (cashPct > 0.05 && turnover > 20_000_000 && turnover <= 30_000_000) {
     notes.push(`${(cashPct * 100).toFixed(1)}% of your turnover is in cash — above the 5% threshold. Reduce cash receipts to qualify for the ₹3Cr limit.`);
   }
 
@@ -1224,10 +1231,13 @@ export function compute234BInterest(schedule, assessmentPaymentDate, fy) {
  * Order matches the physical layout of ITR-4 Sugam.
  * Each row: { field, section, value, note? }
  */
-export function buildITR4FieldMap(inputs, tax, presumptive, deductions) {
+export function buildITR4FieldMap(inputs, tax, presumptive, deductions, pan = '') {
   const rows = [];
-  // Personal info (user fills manually — we can't infer PAN from the app)
-  rows.push({ section: 'Part A — General', field: 'PAN', value: '', note: 'Fill from your profile' });
+  // v1.10.74 - PAN comes from the business profile when it has one.
+  const panText = String(pan || '').trim().toUpperCase();
+  rows.push(panText
+    ? { section: 'Part A — General', field: 'PAN', value: panText }
+    : { section: 'Part A — General', field: 'PAN', value: '', note: 'Fill from your profile' });
   rows.push({ section: 'Part A — General', field: 'Filing Status', value: 'Filed under §139(1) — before due date' });
   rows.push({ section: 'Part A — General', field: 'Aadhaar', value: '', note: 'Must be linked' });
 
@@ -1258,20 +1268,27 @@ export function buildITR4FieldMap(inputs, tax, presumptive, deductions) {
   if (tax.regime === 'old') {
     rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80C', value: Math.min(150_000, Number(deductions?.['80C']) || 0) });
     rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80CCD(1B) — NPS', value: Math.min(50_000, Number(deductions?.['80CCD1B']) || 0) });
-    rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80D — Health Insurance', value: Math.min(100_000, Number(deductions?.['80D']) || 0) });
-    rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80TTA — Savings Interest', value: Math.min(10_000, Number(deductions?.['80TTA']) || 0) });
+    // Same age-dependent limit the tax figure used (was a flat ₹1 lakh, so the
+    // PDF line could disagree with the total below it).
+    const ageCtx = { selfSenior: Number(inputs?.age) >= 60, parentsSenior: !!inputs?.parentsSenior };
+    const cap80D = effectiveDeductionCap('80D', ageCtx);
+    rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80D — Health Insurance', value: Math.min(cap80D, Number(deductions?.['80D']) || 0) });
+    // v1.10.74 - 60+ claim 80TTB instead of 80TTA (same rule as the tax figure).
+    rows.push(ageCtx.selfSenior
+      ? { section: 'C — Deductions (Chapter VI-A)', field: '§80TTB — Deposit Interest (60+)', value: Math.min(effectiveDeductionCap('80TTB', ageCtx), Number(deductions?.['80TTB']) || 0) }
+      : { section: 'C — Deductions (Chapter VI-A)', field: '§80TTA — Savings Interest', value: Math.min(effectiveDeductionCap('80TTA', ageCtx), Number(deductions?.['80TTA']) || 0) });
     rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80E — Education Loan Interest', value: Number(deductions?.['80E']) || 0 });
     rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80G — Donations', value: Number(deductions?.['80G']) || 0 });
     rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '  Total Chapter VI-A', value: tax.allowedDeductions, bold: true });
   } else {
-    rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80CCD(2) — Employer NPS', value: Number(deductions?.['80CCD2']) || 0, note: 'Only deduction allowed under new regime' });
+    rows.push({ section: 'C — Deductions (Chapter VI-A)', field: '§80CCD(2) — Employer NPS', value: tax.allowedDeductions, note: 'Only deduction allowed under new regime' });
   }
 
   // Part D — Tax computation
   rows.push({ section: 'D — Tax Computation', field: 'D1. Taxable Income', value: tax.taxableIncome, bold: true });
   rows.push({ section: 'D — Tax Computation', field: 'D2. Tax on Total Income (slab)', value: tax.slabTax });
-  if (tax.stcgTax) rows.push({ section: 'D — Tax Computation', field: '   + STCG (15%)', value: tax.stcgTax });
-  if (tax.ltcgTax) rows.push({ section: 'D — Tax Computation', field: '   + LTCG (10%)', value: tax.ltcgTax });
+  if (tax.stcgTax) rows.push({ section: 'D — Tax Computation', field: '   + STCG (20%)', value: tax.stcgTax });
+  if (tax.ltcgTax) rows.push({ section: 'D — Tax Computation', field: '   + LTCG (12.5%)', value: tax.ltcgTax });
   if (tax.rebate87A) rows.push({ section: 'D — Tax Computation', field: '   − §87A Rebate', value: -tax.rebate87A });
   if (tax.surcharge) rows.push({ section: 'D — Tax Computation', field: '   + Surcharge', value: tax.surcharge });
   rows.push({ section: 'D — Tax Computation', field: '   + Health & Ed Cess (4%)', value: tax.cess });

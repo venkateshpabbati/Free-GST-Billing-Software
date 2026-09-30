@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import DOMPurify from 'dompurify';
-import { numberToWords, formatCurrency, INVOICE_TYPES, getCountryConfig, CURRENCY_NAMES, formatExchangeRateLine, getAccountById, getPaperSize, resolveLineDiscount, htmlHasText, splitNumberedTerms } from '../utils';
+import { numberToWords, formatCurrency, INVOICE_TYPES, getCountryConfig, CURRENCY_NAMES, formatExchangeRateLine, getAccountById, getPaperSize, resolveLineDiscount, htmlHasText, splitNumberedTerms, invoiceOptionOn, DEFAULT_DECLARATION, filledOrderDetails, formatShortDate } from '../utils';
 import { getPrintSettings, getLabel } from '../utils/printSettings';
+import InvoiceGridLayout, { HsnSummaryTable } from './InvoiceGridLayout';
 
 // v1.10.36 — Optional `previewOnly` prop suppresses the internal
 // `id="invoice-preview"`. The parent's on-screen preview keeps the id
@@ -11,7 +12,7 @@ import { getPrintSettings, getLabel } from '../utils/printSettings';
 // instance renders with previewOnly=true so it doesn't create a
 // duplicate id on the page — HTML-invalid + could confuse getElementById
 // lookups.
-const InvoicePreview = React.forwardRef(({ profile, client, details, items, totals, invoiceType = 'tax-invoice', customTerms, customNotes, extraSections = [], options = {}, previewOnly = false }, ref) => {
+const InvoicePreview = React.forwardRef(({ profile, client, details, items, totals, invoiceType = 'tax-invoice', customTerms, customNotes, extraSections = [], options = {}, previewOnly = false, cancelled = false }, ref) => {
   // Interstate detection must match InvoiceGenerator.jsx — it honours
   // details.placeOfSupply (POS override) and client.isSEZ (SEZ supplies
   // are always interstate regardless of physical state). Without this
@@ -77,6 +78,9 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
   const showSignatoryText = opt('showSignatoryText');
   const showTerms = opt('showTerms');
   const showNotes = opt('showNotes');
+  // v1.10.70 - requested (#72, @sangwanmail-eng). OFF unless chosen: most
+  // invoices are signed, and this line would contradict a signature.
+  const showSystemGeneratedNote = opt('showSystemGeneratedNote', false);
   const showAmountWords = opt('showAmountWords');
   const showDueDate = opt('showDueDate');
   const showItemQty = opt('showItemQty');
@@ -119,6 +123,9 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
   const _ps_dc = _ps;
   // v1.9.3 — same settings alias used by getLabel() calls throughout the JSX
   const _ps_labels = _ps_dc;
+  // v1.10.74 - "Total Due" follows the label language; English keeps "Total Due" (preset says "Total").
+  const _totalLabel = getLabel(_ps_labels, 'total');
+  const totalDueLabel = _totalLabel === 'Total' ? 'Total Due' : _totalLabel;
   const dualCurrencyOn = _ps_dc.dualCurrencyEnabled && currencySymbol === 'INR' && _ps_dc.dualCurrencyCode && Number(_ps_dc.dualCurrencyRate) > 0;
   const fmtDualSecondary = (amount) => {
     if (!dualCurrencyOn || _ps_dc.dualCurrencyPosition !== 'below') return '';
@@ -193,6 +200,43 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
   // Check if any item has discount
   const hasAnyDiscount = showDiscount && items.some(item => (item.discount || 0) > 0);
 
+  // v1.10.73 - one per-line calculation for every design, the item table and
+  // the HSN/SAC summary, so they can never disagree with each other.
+  // v1.10.29 - resolveLineDiscount respects discountType + discountBase, as
+  // computeInvoiceTotals does for the totals.
+  const lineCalc = (item) => {
+    const discount = resolveLineDiscount(item);
+    const grossAfterDiscount = Math.max(0, (Number(item.quantity) || 0) * (Number(item.rate) || 0) - discount);
+    const rate = Number(item.taxPercent) || 0;
+    const inclusive = totals.taxInclusive && showGST;
+    const taxable = inclusive ? grossAfterDiscount / (1 + rate / 100) : grossAfterDiscount;
+    const tax = !showGST ? 0 : (inclusive ? grossAfterDiscount - taxable : taxable * rate / 100);
+    return { discount, taxable, tax, rate };
+  };
+  // HSN/SAC-wise tax summary (Tally's table under the items). A line counts
+  // if it has an HSN/SAC or carries tax; untaxed reimbursements without a
+  // code (fuel, courier) are left out, as Tally does.
+  const hsnRows = (() => {
+    const map = new Map();
+    for (const item of items) {
+      const l = lineCalc(item);
+      if (!item.hsn && !(l.tax > 0)) continue;
+      const k = `${item.hsn || ''}|${l.rate}`;
+      const r = map.get(k) || { hsn: item.hsn || '', rate: l.rate, taxable: 0, tax: 0 };
+      r.taxable += l.taxable; r.tax += l.tax;
+      map.set(k, r);
+    }
+    return [...map.values()];
+  })();
+  const pdfStyleForOptions = pdfStyleRaw;
+  const showHsnSummary = showGST && invoiceOptionOn(options, 'showHsnSummary', pdfStyleForOptions);
+  const showTaxInWords = showGST && invoiceOptionOn(options, 'showTaxInWords', pdfStyleForOptions);
+  const showDeclaration = invoiceOptionOn(options, 'showDeclaration', pdfStyleForOptions);
+  const showCustomerSeal = invoiceOptionOn(options, 'showCustomerSeal', pdfStyleForOptions);
+  const declarationText = options.declarationText ?? DEFAULT_DECLARATION;
+  const totalTax = Number(totals.totalTaxAmount) || ((totals.cgst || 0) + (totals.sgst || 0) + (totals.utgst || 0) + (totals.igst || 0) + (totals.cess || 0));
+  const orderDetails = filledOrderDetails(details || {});
+
   // Header renderers per style
   const renderModernHeader = () => (
     <>
@@ -256,6 +300,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
             {showInvoiceDate && <p style={{ margin: 0 }}>{details?.invoiceDate ? new Date(details.invoiceDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : ''}</p>}
             {showDueDate && details?.dueDate && <p style={{ margin: 0 }}>Due: {new Date(details.dueDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</p>}
             {showReverseChargeLine && <p style={{ margin: 0 }}>Reverse Charge: {reverseChargeText}</p>}
+            {/* v1.10.74 - Classic and Modern print the credit note's original invoice; Minimal dropped it. */}
+            {invoiceType === 'credit-note' && details?.originalInvoiceRef && <p style={{ margin: 0 }}>Against Invoice: {details.originalInvoiceRef}</p>}
           </div>
         </div>
       </div>
@@ -664,6 +710,20 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
                   <span style={{ textAlign: 'right' }}>{amt(totals.cess)}</span>
                 </div>
               )}
+              {/* v1.10.74 - TOTAL already includes TCS and the whole-bill
+                  discount; print them so the receipt adds up (same values as the sheet layout). */}
+              {Number(totals?.tcsAmount) > 0 && (
+                <div style={rowStyle}>
+                  <span>{cap('TCS')}</span>
+                  <span style={{ textAlign: 'right' }}>{amt(totals.tcsAmount)}</span>
+                </div>
+              )}
+              {Number(totals?.invoiceDiscountAmount) > 0 && (
+                <div style={rowStyle}>
+                  <span>{cap('Discount on total')}</span>
+                  <span style={{ textAlign: 'right' }}>-{amt(totals.invoiceDiscountAmount)}</span>
+                </div>
+              )}
               {showRoundOff && Number(totals?.roundOff) !== 0 && (
                 <div style={rowStyle}>
                   <span>{cap('Round-off')}</span>
@@ -681,6 +741,18 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
                 <span>{cap('TOTAL')}</span>
                 <span style={{ textAlign: 'right' }}>{amt(totals?.total)}</span>
               </div>
+              {Number(totals?.tdsAmount) > 0 && (
+                <>
+                  <div style={{ ...rowStyle, marginTop: 4 }}>
+                    <span>{cap('Less: TDS')}</span>
+                    <span style={{ textAlign: 'right' }}>-{amt(totals.tdsAmount)}</span>
+                  </div>
+                  <div style={{ ...rowStyle, fontWeight: strongWeight }}>
+                    <span>{cap('Net Receivable')}</span>
+                    <span style={{ textAlign: 'right' }}>{amt(totals.netReceivable)}</span>
+                  </div>
+                </>
+              )}
             </div>
           );
         })()}
@@ -868,7 +940,73 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
     ...(pdfFontSizeCss ? { fontSize: pdfFontSizeCss } : {}),
     ...(pdfFontWeightCss ? { fontWeight: pdfFontWeightCss } : {}),
     ...(pdfCapsOn ? { textTransform: 'uppercase' } : {}),
+    // v1.10.67 (#66 item 12) — origin for the CANCELLED watermark below.
+    position: 'relative',
   };
+
+  // v1.10.73 - Boxed grid / Tally style get everything already worked out
+  // above, so their numbers are the same as every other design's.
+  const isGrid = pdfStyle === 'boxed' || pdfStyle === 'tally';
+  const sanitizedTerms = customTerms ? splitNumberedTerms(DOMPurify.sanitize(customTerms)) : '';
+  const sanitizedNotes = customNotes ? splitNumberedTerms(DOMPurify.sanitize(customNotes)) : '';
+  const taxedRates = [...new Set(items.map((it) => lineCalc(it)).filter((l) => l.tax > 0).map((l) => l.rate))];
+  const gridSig = (() => {
+    const sigImg = profile?.signature || (_ps.signatureShow !== false ? _ps.signatureImage : null);
+    const stampImg = profile?.stamp || null;
+    return {
+      show: showSignature && !!(sigImg || stampImg), sigImg, stampImg,
+      sigHeight: Number(profile?.signatureHeight) || 60, stampHeight: Number(profile?.stampHeight) || 70,
+    };
+  })();
+  const shipToParty = details?.shipToSameAsBilling === false
+    && (details?.shippingAddress || details?.shippingCity || details?.shippingState)
+    ? { name: client?.name, address: details.shippingAddress, city: details.shippingCity, pin: details.shippingPin, state: details.shippingState }
+    : null;
+  const gridNotices = (
+    <>
+      {options.reverseCharge && isIndia && showGST && (
+        <div data-pdf-page-boundary="" style={{ margin: '2px 0 6px', fontSize: '0.92em' }}>
+          <strong>Reverse Charge applicable.</strong> GST is payable by the recipient under Section 9(3)/9(4) of the CGST Act.
+        </div>
+      )}
+      {invoiceType === 'composition' && (
+        <div data-pdf-page-boundary="" style={{ margin: '2px 0 6px', fontStyle: 'italic', fontSize: '0.92em' }}>
+          &quot;Composition taxable person, not eligible to collect tax on supplies.&quot; (Rule 46A, CGST Rules)
+        </div>
+      )}
+      {options.exchangeRate && currencySymbol !== 'INR' && (
+        <div data-pdf-page-boundary="" style={{ margin: '2px 0 6px', fontSize: '0.92em' }}>
+          {formatExchangeRateLine(currencySymbol, options.exchangeRate, profile?.country === 'India' || !profile?.country ? 'INR' : sellerCC.currency)}
+        </div>
+      )}
+    </>
+  );
+  const gridCtx = isGrid ? {
+    style: pdfStyle, profile, client, details, items, totals, options, invoiceType, accent, fmt, lineCalc, hsnRows,
+    invoiceTitle: customTitle, isIndia, isInterstate, taxLabel, sellerCC, account,
+    showGST, hasAnyDiscount, showAmountWords, showBankDetails, showSignatoryText, showSystemGeneratedNote,
+    showReverseChargeLine, reverseChargeText, qrDataUrl, upiId,
+    showHsnSummary, showTaxInWords, showDeclaration, showCustomerSeal, declarationText, totalTax,
+    singleRate: taxedRates.length === 1 ? taxedRates[0] : null,
+    words: (n) => (currencySymbol === 'INR' ? `INR ${numberToWords(n)}` : amountInWords(n)),
+    shortDate: formatShortDate,
+    isServices: (options.invoiceMode || 'goods') === 'services',
+    docLabel: ({ quotation: 'Quotation', proforma: 'Proforma', 'credit-note': 'Credit Note', 'delivery-challan': 'Challan' })[invoiceType] || 'Invoice',
+    placeOfSupply: details?.placeOfSupply || client?.state || '',
+    shipTo: shipToParty,
+    sig: gridSig,
+    notices: gridNotices,
+    termsHtml: !_ps.termsSeparatePage && showTerms && htmlHasText(sanitizedTerms) ? sanitizedTerms : '',
+    notesHtml: !_ps.termsSeparatePage && showNotes && htmlHasText(sanitizedNotes) ? sanitizedNotes : '',
+    termsClassMod,
+    t: {
+      logo: showLogo, businessName: showBusinessName, businessAddress: showBusinessAddress,
+      businessPhone: showBusinessPhone, businessEmail: showBusinessEmail, gstin: showGSTIN, state: showState,
+      clientAddress: showClientAddress, clientPhone: showClientPhone, clientEmail: showClientEmail,
+      placeOfSupply: showPlaceOfSupply, invoiceNumber: showInvoiceNumber, invoiceDate: showInvoiceDate, dueDate: showDueDate,
+      hsn: showHSN, itemQty: showItemQty, itemUnit: showItemUnit, rate: showRateColumn,
+    },
+  } : null;
 
   return (
     <div
@@ -877,11 +1015,56 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
       data-row-density={_ps_final.rowDensity || 'normal'}
       data-header-compact={_ps_final.headerCompact ? '1' : '0'}
       ref={ref} {...(previewOnly ? {} : { id: 'invoice-preview' })} style={finalContainerStyle}>
+      {cancelled && (
+        <div aria-hidden="true" style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          pointerEvents: 'none', zIndex: 5,
+        }}>
+          <span style={{
+            transform: 'rotate(-24deg)', whiteSpace: 'nowrap',
+            fontSize: '3.6rem', fontWeight: 800, letterSpacing: '0.18em',
+            color: 'rgba(220, 38, 38, 0.22)',
+            border: '6px solid rgba(220, 38, 38, 0.22)', borderRadius: 14,
+            padding: '0.3rem 1.6rem',
+          }}>CANCELLED</span>
+        </div>
+      )}
+      {isGrid && <InvoiceGridLayout ctx={gridCtx} />}
+      {isGrid && _ps.termsSeparatePage && (htmlHasText(sanitizedTerms) || htmlHasText(sanitizedNotes)) && (
+        <div data-pdf-page="terms" style={{ padding: '2rem', pageBreakBefore: 'always', breakBefore: 'page' }}>
+          {showTerms && htmlHasText(sanitizedTerms) && (
+            <div className="inv-footer-block">
+              <h4 className="inv-section-label">{getLabel(_ps_labels, 'terms')}</h4>
+              <div className={`inv-terms inv-rich ${termsClassMod}`} dangerouslySetInnerHTML={{ __html: sanitizedTerms }} />
+            </div>
+          )}
+          {showNotes && htmlHasText(sanitizedNotes) && (
+            <div className="inv-footer-block" style={{ marginTop: '2rem' }}>
+              <h4 className="inv-section-label">{getLabel(_ps_labels, 'notes')}</h4>
+              <div className={`inv-terms inv-rich ${termsClassMod}`} dangerouslySetInnerHTML={{ __html: sanitizedNotes }} />
+            </div>
+          )}
+        </div>
+      )}
+      {!isGrid && (<>
       {!hideHeaderBecauseLetterhead && pdfStyle === 'modern' && renderModernHeader()}
       {!hideHeaderBecauseLetterhead && pdfStyle === 'minimal' && renderMinimalHeader()}
       {!hideHeaderBecauseLetterhead && pdfStyle === 'classic' && renderClassicHeader()}
 
       {renderParties()}
+
+      {/* v1.10.73 - order / dispatch / reference details, when any are filled */}
+      {orderDetails.length > 0 && (
+        <div className="inv-parties inv-order-details" data-pdf-page-boundary=""
+          style={{ margin: pdfStyle === 'classic' ? '0 0 0.75rem' : '0 2rem 0.75rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: '0.25rem 1rem', fontSize: '0.75rem' }}>
+          {orderDetails.map((f) => (
+            <div key={f.key} style={f.wide ? { gridColumn: '1 / -1' } : undefined}>
+              <span style={{ color: '#475569' }}>{f.label}: </span><strong>{f.value}</strong>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Items table */}
       <table className="inv-table" style={{ tableLayout: 'auto', ...(pdfStyle === 'modern' ? { margin: '0 2rem', width: 'calc(100% - 4rem)' } : pdfStyle === 'minimal' ? { margin: '0 2rem', width: 'calc(100% - 4rem)', borderTop: 'none' } : {}) }}>
@@ -957,21 +1140,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
         </thead>
         <tbody>
           {items.map((item, index) => {
-            const lineAmount = item.quantity * item.rate;
-            // v1.10.29 — reported: Unit-base and Price-With-Tax discounts
-            // showed the wrong per-line tax breakdown while the totals bar
-            // showed the correct number. Root cause: per-line render used
-            // `item.discount` (raw value) instead of `resolveLineDiscount`
-            // which respects discountType + discountBase. computeInvoiceTotals
-            // (used by the totals bar) already routed through resolveLineDiscount,
-            // so totals and per-line were computed with different discount
-            // values → GST mismatch inside a single PDF. Now both paths agree.
-            const discount = resolveLineDiscount(item);
-            const grossAfterDiscount = Math.max(0, lineAmount - discount);
-            const taxRate = item.taxPercent || 0;
-            const isTaxInclusive = totals.taxInclusive;
-            const afterDiscount = isTaxInclusive && showGST ? grossAfterDiscount / (1 + taxRate / 100) : grossAfterDiscount;
-            const taxAmount = isTaxInclusive && showGST ? grossAfterDiscount - afterDiscount : afterDiscount * taxRate / 100;
+            // Shared with the grid designs and the HSN summary (lineCalc).
+            const { discount, taxable: afterDiscount, tax: taxAmount, rate: taxRate } = lineCalc(item);
             const halfRate = taxRate / 2;
             const halfTax = taxAmount / 2;
             return (
@@ -1054,7 +1224,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
         <div className="inv-totals">
           {showSubtotal && (
             <div className="inv-total-row">
-              <span>Subtotal</span>
+              {/* v1.10.74 - Subtotal / Total Due / Authorized Signatory now follow the label language. */}
+              <span>{getLabel(_ps_labels, 'subtotal')}</span>
               <span>{fmt(totals.subtotal)}</span>
             </div>
           )}
@@ -1120,12 +1291,12 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
           )}
           {pdfStyle === 'modern' ? (
             <div className="inv-total-row inv-total-final inv-total-modern" style={{ background: accent, color: '#fff', borderRadius: '6px', padding: '0.6rem 0.75rem', marginTop: '0.25rem' }}>
-              <span style={{ color: '#fff' }}>{invoiceType === 'credit-note' ? 'Credit Amount' : 'Total Due'}</span>
+              <span style={{ color: '#fff' }}>{invoiceType === 'credit-note' ? 'Credit Amount' : totalDueLabel}</span>
               <span style={{ color: '#fff' }}>{fmt(totals.total)}</span>
             </div>
           ) : (
             <div className="inv-total-row inv-total-final">
-              <span>{invoiceType === 'credit-note' ? 'Credit Amount' : 'Total Due'}</span>
+              <span>{invoiceType === 'credit-note' ? 'Credit Amount' : totalDueLabel}</span>
               <span style={{ color: accent }}>{fmt(totals.total)}</span>
             </div>
           )}
@@ -1143,6 +1314,19 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
           )}
         </div>
       </div>
+
+      {(showHsnSummary && hsnRows.length > 0) || (showTaxInWords && totalTax > 0) ? (
+        <div style={{ margin: pdfStyle === 'classic' ? '0 0 0.75rem' : '0 2rem 0.75rem', fontSize: '0.75rem' }}>
+          {showHsnSummary && hsnRows.length > 0 && (
+            <HsnSummaryTable ctx={{ hsnRows, isIndia, isInterstate, taxLabel, totals }} />
+          )}
+          {showTaxInWords && totalTax > 0 && (
+            <p data-pdf-page-boundary="" style={{ margin: '0.35rem 0 0' }}>
+              Tax amount (in words): <strong>{currencySymbol === 'INR' ? numberToWords(totalTax) : amountInWords(totalTax)}</strong>
+            </p>
+          )}
+        </div>
+      ) : null}
 
       {/* Reverse-charge declaration (India) — printed prominently between the
           tax block and the footer when the seller has flagged this invoice as
@@ -1239,6 +1423,20 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
               </div>
             ) : null;
           })()}
+          {/* v1.10.70 (#72) - below Terms & Conditions, as asked. */}
+          {showSystemGeneratedNote && (
+            <div className="inv-footer-block inv-system-note">
+              <p className="inv-terms" style={{ margin: 0, fontStyle: 'italic' }}>
+                <strong>Note:</strong> This is a system-generated invoice. No signature or stamp is required.
+              </p>
+            </div>
+          )}
+          {showDeclaration && (
+            <div className="inv-footer-block">
+              <h4 className="inv-section-label">DECLARATION</h4>
+              <p className="inv-terms" style={{ margin: 0 }}>{declarationText}</p>
+            </div>
+          )}
         </div>
         {/* v1.10.5 — Separate T&C page. Uses the same data-pdf-page
              attribute the extraSections feature uses, so buildPDF's
@@ -1274,24 +1472,36 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
           const printCfg = _ps;  // v1.10.4 — reuse top-of-function read
           const sigImg = profile?.signature || (printCfg.signatureShow !== false ? printCfg.signatureImage : null);
           const sigName = profile?.businessName || printCfg.signatureName;
-          if (!showSignature || !sigImg) return null;
+          // v1.10.67 (#66 item 13) — the stamp is a separate image with its own
+          // height, so it no longer has to be pasted into the signature file.
+          // Either one alone is enough to print the block.
+          const stampImg = profile?.stamp || null;
+          const sigMaxHeight = Number(profile?.signatureHeight) || 60;
+          const stampMaxHeight = Number(profile?.stampHeight) || 70;
+          if (!showSignature || (!sigImg && !stampImg)) return null;
           return (
             <div className="inv-signature">
-              {showSignatoryText && <p className="inv-sig-label">Authorized Signatory</p>}
-              <img src={sigImg} alt="Signature" style={{
-                maxHeight: '60px', maxWidth: '180px', objectFit: 'contain',
-                display: 'block', marginLeft: 'auto', marginBottom: '0.4rem'
-              }} />
+              {showSignatoryText && <p className="inv-sig-label">{getLabel(_ps_labels, 'authorizedSignatory')}</p>}
+              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                {stampImg && <img src={stampImg} alt="Stamp" style={{
+                  maxHeight: `${stampMaxHeight}px`, maxWidth: '120px', objectFit: 'contain', display: 'block',
+                }} />}
+                {sigImg && <img src={sigImg} alt="Signature" style={{
+                  maxHeight: `${sigMaxHeight}px`, maxWidth: '180px', objectFit: 'contain', display: 'block',
+                }} />}
+              </div>
               <p className="inv-sig-name">{sigName}</p>
             </div>
           );
         })()}
       </div>
+      </>)}
 
       {/* Extra Sections - each starts on new page */}
       {(() => {
         const filtered = extraSections.filter(s => s.title || s.content);
-        const totalPages = filtered.length > 0 ? 1 + filtered.length : 1;
+        // v1.10.74 - dropped "Page N of M": M assumed a one-page invoice, so it
+        // was wrong whenever the invoice itself ran longer.
         return filtered.map((section, idx) => (
           <div key={section.id} className="inv-extra-page" data-pdf-page={idx + 2}>
             <div className="inv-extra-page-header">
@@ -1299,7 +1509,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
                 <span className="inv-extra-ref">{customTitle} — {details?.invoiceNumber}</span>
                 {client?.name && <span className="inv-extra-ref"> | {client.name}</span>}
               </div>
-              <span className="inv-extra-page-num">Page {idx + 2} of {totalPages}</span>
             </div>
             {section.title && <h4 className="inv-section-label" style={{ marginBottom: '0.75rem' }}>{section.title.toUpperCase()}</h4>}
             {section.content && (

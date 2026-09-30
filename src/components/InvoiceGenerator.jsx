@@ -3,7 +3,7 @@ import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronU
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import { saveBill, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, saveProduct, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllBills } from '../store';
-import { INVOICE_TYPES, generateEWayBillJSON, formatCurrency, getCountryConfig, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, calculateRoundOff, getCountriesForRegion, TDS_SECTIONS, TCS_SECTIONS, TERMS_PRESETS, getActiveAccounts, getDefaultAccount, getAccountById, getDefaultUnitForMode, filterUnitsByMode, PAPER_SIZES, getPaperSize, computeInvoiceTotals, htmlHasText } from '../utils';
+import { INVOICE_TYPES, COUNTRIES, generateEWayBillJSON, formatCurrency, getCountryConfig, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, getCountriesForRegion, TDS_SECTIONS, TCS_SECTIONS, REMOVED_TCS_SECTIONS, TERMS_PRESETS, getActiveAccounts, getDefaultAccount, getAccountById, getDefaultUnitForMode, filterUnitsByMode, PAPER_SIZES, getPaperSize, computeInvoiceTotals, clientYearToDate, htmlHasText, ORDER_DETAIL_FIELDS, invoiceOptionOn, DEFAULT_DECLARATION, decodeGstin, safePageBoundaries } from '../utils';
 import { getPrintSettings, savePrintSettings } from '../utils/printSettings';
 import { openWhatsAppShare } from '../utils/share';
 import { confirmAction, promptAction } from './ConfirmModal';
@@ -142,8 +142,8 @@ const DEFAULT_OPTIONS = {
   // exist; a future feature can auto-populate them from prior bills.
   tdsCumulativeThisYear: 0,
   showTCS: false,
-  tcsSection: '206C(1H)',
-  tcsRate: 0.1,
+  tcsSection: '52',
+  tcsRate: 1,
   tcsCumulativeThisYear: 0,
   customTitle: '',
   currency: 'INR',
@@ -182,6 +182,8 @@ const PDF_STYLES = [
   { id: 'classic', label: 'Classic', desc: 'Clean with top accent bar' },
   { id: 'modern', label: 'Modern', desc: 'Bold header with color block' },
   { id: 'minimal', label: 'Minimal', desc: 'Simple, borderless layout' },
+  { id: 'boxed', label: 'Boxed grid', desc: 'Every section in ruled boxes, item table filled to a fixed height' },
+  { id: 'tally', label: 'Tally style', desc: 'The Tally layout: order and dispatch boxes, HSN tax summary, declaration' },
 ];
 
 // v1.10.7 — audit H14. Extracted from the inline `items.map(...)` block
@@ -204,6 +206,11 @@ const PDF_STYLES = [
 //
 // Perf win: typing "Widget" (6 chars) in row 1 of an invoice with 20
 // items used to trigger 20 × 6 = 120 row re-renders. Now: 6 (just row 1).
+// v1.10.74 - the fixed-discount pickers showed "₹" on every invoice; show
+// the invoice currency's own symbol (falls back to the code, e.g. "AED").
+const currencySymbolFor = (code) =>
+  COUNTRIES.find(c => c.currency === (code || 'INR'))?.currencySymbol || code || '₹';
+
 // v1.10.37 — Sub-component: the Description input + product-suggestion
 // dropdown, with keyboard navigation. Extracted so LineItem stays lean
 // and the local `activeIdx` state doesn't cause other row fields to
@@ -241,6 +248,7 @@ function SuggestingInput({ item, suggestions, onFieldChange, onSelectProduct, on
   return (
     <>
       <input type="text" className="form-input" value={item.name}
+        placeholder="Item"
         onChange={(e) => onFieldChange(item.id, 'name', e.target.value)}
         onBlur={() => setTimeout(() => onSetProductSearch({ itemId: null, query: '' }), 200)}
         onKeyDown={handleKey}
@@ -272,7 +280,7 @@ const LineItem = memo(function LineItem({
   currency, profileCountry, suggestions,
   onFieldChange, onSelectProduct, onSetProductSearch,
   onAddCustomUnit, onRemoveCustomUnit, onRemove, clampNonNeg,
-  isLastRow, onAddRow,
+  isLastRow, onAddRow, isOnlyRow,
 }) {
   // v1.10.37 — Keyboard shortcut: Enter on any input inside the LAST
   // row adds a new row. Muscle-memory for POS users — reported: "if
@@ -293,7 +301,8 @@ const LineItem = memo(function LineItem({
   return (
     <div className="line-item-row" data-item-id={item.id} onKeyDown={handleRowKeyDown}>
       <div className="line-item-field" style={{ flex: 2.5, position: 'relative' }}>
-        <label className="form-label">Description</label>
+        {/* v1.10.74 - was "Description", which clashed with "+ Add description" below. */}
+        <label className="form-label">Item</label>
         {/* v1.10.37 — Keyboard nav on product suggestions. Reported:
             "20 invoices/day is slow because product picker forces the
             mouse." Now: ArrowDown / ArrowUp cycles suggestions, Enter
@@ -341,6 +350,7 @@ const LineItem = memo(function LineItem({
       <div className="line-item-field" style={{ flex: 0.7 }}>
         <label className="form-label">Qty</label>
         <input type="number" min="0" step="any" className="form-input" value={item.quantity}
+          onFocus={(e) => e.target.select()}
           onChange={(e) => onFieldChange(item.id, 'quantity', clampNonNeg(e.target.value))} />
       </div>
       <div className="line-item-field" style={{ flex: 0.9 }}>
@@ -376,6 +386,7 @@ const LineItem = memo(function LineItem({
       <div className="line-item-field" style={{ flex: 1.2 }}>
         <label className="form-label">Rate</label>
         <input type="number" min="0" step="any" className="form-input" value={item.rate}
+          onFocus={(e) => e.target.select()}
           onChange={(e) => onFieldChange(item.id, 'rate', clampNonNeg(e.target.value))} />
       </div>
       {invoiceOptions.showDiscount && (
@@ -390,6 +401,7 @@ const LineItem = memo(function LineItem({
               total — tax gets backed out so consumer sees clean round). */}
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
             <input type="number" min="0" step="any" className="form-input" value={item.discount}
+              onFocus={(e) => e.target.select()}
               onChange={(e) => onFieldChange(item.id, 'discount', clampNonNeg(e.target.value))}
               style={{ flex: 1, minWidth: 55 }} />
             <select className="form-input"
@@ -397,7 +409,7 @@ const LineItem = memo(function LineItem({
               onChange={(e) => onFieldChange(item.id, 'discountType', e.target.value)}
               style={{ width: 52, padding: '0.4rem 0.3rem', fontSize: '0.82rem' }}
               title="Discount mode: fixed amount or percent of line">
-              <option value="fixed">₹</option>
+              <option value="fixed">{currencySymbolFor(currency)}</option>
               <option value="percent">%</option>
             </select>
             {/* Base only meaningful for fixed-mode. Percent of any base is
@@ -456,7 +468,9 @@ const LineItem = memo(function LineItem({
         </div>
       )}
       <div className="line-item-field line-item-delete">
-        <button className="icon-btn icon-btn-red" onClick={() => onRemove(item.id)} title="Remove"><Trash2 size={16} /></button>
+        {/* v1.10.74 - removeItem keeps the last row, so the button did nothing there; say so. */}
+        <button className="icon-btn icon-btn-red" onClick={() => onRemove(item.id)}
+          disabled={isOnlyRow} title={isOnlyRow ? 'An invoice needs at least one line' : 'Remove'}><Trash2 size={16} /></button>
       </div>
       {/* v1.10.22 — inline expandable description per row. Reported: "add
           option so user can directly enter product description into
@@ -696,12 +710,16 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     : [];
   const baseCountryRates = sellerCountryConfig.taxRates && sellerCountryConfig.taxRates.length
     ? sellerCountryConfig.taxRates
-    : [0, 5, 12, 18, 28];
+    : [0, 5, 12, 18, 28, 40];
   const countryTaxRates = useMemo(
     () => [...new Set([...baseCountryRates, ...customRates])].sort((a, b) => a - b),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseCountryRates.join(','), customRates.join(',')]
   );
+  // Rate for a new row: 18% where it exists (India's standard rate), else the
+  // second-highest rate. Was always second-highest, which turns into 28% once
+  // 40% is in the list.
+  const defaultTaxRate = countryTaxRates.includes(18) ? 18 : (countryTaxRates[countryTaxRates.length - 2] ?? 0);
   const taxLabel = sellerCountryConfig.taxLabel || 'GST';
 
   // Clamp a numeric input to non-negative (and finite). Used for qty/rate/discount.
@@ -852,11 +870,9 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     // NEW-bill guard: skip server auto-save until the user has explicitly
     // saved once. The sessionStorage draft is still auto-persisted via the
     // separate effect below, so nothing is lost if the tab crashes.
-    if (!editingBill && !hasBeenSaved.current) {
-      setAutoSaveStatus('saved');
-      setTimeout(() => setAutoSaveStatus(s => s === 'saved' ? 'idle' : s), 2000);
-      return;
-    }
+    // Nothing is stored yet, so the badge must not say "All changes saved"
+    // (it used to flash that here); it reads "Not saved yet" instead.
+    if (!editingBill && !hasBeenSaved.current) return;
 
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current = setTimeout(async () => {
@@ -897,7 +913,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     saveAndExit: async () => {
       try {
         setAutoSaveStatus('saving');
-        await saveInvoiceToDB(true);
+        const no = await saveInvoiceToDB();
+        if (!no) { setAutoSaveStatus('idle'); return; }
         toast('Invoice saved', 'success');
         clearDraft();
         setLeaveModal(false);
@@ -1125,7 +1142,33 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     if (liveMatch && liveMatch !== activeProfile) setActiveProfile(liveMatch);
   }, [editingBill, allProfiles, activeProfile]);
 
+  const isIssuedInvoice = !!editingBill && !editingBill._isDuplicate && !editingBill._convertToType;
+
+  // v1.10.68 (#68, idea from @deppen12) — the GSTIN already names the state and
+  // carries a checksum, so fill the state and catch a typo without any API key
+  // or internet. The state decides place of supply: get it wrong and the
+  // invoice charges CGST + SGST where it owes IGST, or the other way round.
+  const [gstinHint, setGstinHint] = useState(null);
+  const handleClientGstinBlur = () => {
+    const decoded = decodeGstin(client.gstin);
+    if (!decoded) { setGstinHint(null); return; }
+    if (!decoded.checksumOk) {
+      setGstinHint({ tone: 'warn', message: 'This GSTIN fails its own checksum — check for a typo.' });
+      return;
+    }
+    if (!decoded.state) { setGstinHint(null); return; }
+    if (!client.state?.trim()) {
+      setClient(prev => ({ ...prev, state: decoded.state }));
+      setGstinHint({ tone: 'ok', message: `Registered in ${decoded.state} — state filled in.` });
+    } else if (client.state.trim().toLowerCase() !== decoded.state.toLowerCase()) {
+      setGstinHint({ tone: 'warn', message: `This GSTIN is registered in ${decoded.state}, but the state says ${client.state}.` });
+    } else {
+      setGstinHint({ tone: 'ok', message: `Registered in ${decoded.state}.` });
+    }
+  };
+
   const handleTypeChange = async (type) => {
+    if (isIssuedInvoice) return;
     setInvoiceType(type);
     const config = INVOICE_TYPES[type];
     // v1.10.14 — honour the per-type prefix override when switching invoice type.
@@ -1147,7 +1190,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   };
 
   const toggleOption = (key) => {
-    setInvoiceOptions(prev => ({ ...prev, [key]: !prev[key] }));
+    setInvoiceOptions(prev => ({ ...prev, [key]: !invoiceOptionOn(prev, key) }));
   };
 
   // v1.10.4 — useMemo replaces the prior useEffect+setTotals pair. Same
@@ -1158,10 +1201,17 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   // profile.gstin stand in for a missing state. All three must be listed:
   // switching only the country left the old CGST + SGST split on screen, and
   // that stale split is what Save stored.
+  // This client's sales so far this financial year, for the ₹50L threshold of
+  // 194Q / 206C(1H). Not stored in invoiceOptions (it changes with every
+  // invoice); fed to the calculation only.
+  const clientYtd = useMemo(
+    () => clientYearToDate(allBillsForCredit, client?.name, details?.invoiceDate, editingBill?.id),
+    [allBillsForCredit, client?.name, details?.invoiceDate, editingBill?.id],
+  );
   const totals = useMemo(() => computeInvoiceTotals({
     items, profile, client, details, showGST, taxInclusive,
-    invoiceOptions,
-  }), [items, client.state, client?.country, client?.gstin, client?.isSEZ, profile?.state, profile?.country, profile?.gstin, showGST, taxInclusive, invoiceOptions.showRoundOff, invoiceOptions.showTDS, invoiceOptions.tdsRate, invoiceOptions.tdsCumulativeThisYear, invoiceOptions.showTCS, invoiceOptions.tcsRate, invoiceOptions.tcsCumulativeThisYear, invoiceOptions.reverseCharge, invoiceOptions.invoiceDiscountValue, invoiceOptions.invoiceDiscountType, details?.placeOfSupply]);
+    invoiceOptions: { ...invoiceOptions, tcsCumulativeThisYear: clientYtd, tdsCumulativeThisYear: clientYtd },
+  }), [clientYtd, invoiceOptions.tcsSection, invoiceOptions.tdsSection, items, client.state, client?.country, client?.gstin, client?.isSEZ, profile?.state, profile?.country, profile?.gstin, showGST, taxInclusive, invoiceOptions.showRoundOff, invoiceOptions.showTDS, invoiceOptions.tdsRate, invoiceOptions.tdsCumulativeThisYear, invoiceOptions.showTCS, invoiceOptions.tcsRate, invoiceOptions.tcsCumulativeThisYear, invoiceOptions.reverseCharge, invoiceOptions.invoiceDiscountValue, invoiceOptions.invoiceDiscountType, details?.placeOfSupply]);
 
   // v1.10.24 — Compute available client credit from prior overpayments.
   // Excludes the bill we're editing (that would double-count our own
@@ -1227,7 +1277,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       hsn: product.hsn || '',
       rate: salePrice,
       unit: product.unit || item.unit || 'Nos',
-      taxPercent: product.taxPercent ?? (countryTaxRates[countryTaxRates.length - 2] ?? 18),
+      taxPercent: product.taxPercent ?? defaultTaxRate,
       productId: product.id,
     } : item));
     setProductSearch({ itemId: null, query: '' });
@@ -1252,7 +1302,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     const newId = Date.now().toString();
     setItems(prev => [...prev, {
       id: newId, name: '', hsn: '', quantity: 1, unit: defaultUnit, rate: 0, discount: 0,
-      taxPercent: showGST ? (countryTaxRates[countryTaxRates.length - 2] ?? 18) : 0,
+      taxPercent: showGST ? defaultTaxRate : 0,
       cessPercent: 0,
     }]);
     // Move keyboard focus to the new row's Description field so users who
@@ -1372,7 +1422,9 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
 
   // Open modal to add new client (pre-fill from current invoice fields)
   const openAddClientModal = () => {
-    setModalClient({ name: client.name || '', address: client.address || '', city: client.city || '', pin: client.pin || '', state: client.state || '', gstin: client.gstin || '' });
+    // v1.10.74 - pass country too; without it the modal fell back to the
+    // business country and saving could overwrite the invoice's country.
+    setModalClient({ name: client.name || '', address: client.address || '', city: client.city || '', pin: client.pin || '', state: client.state || '', gstin: client.gstin || '', country: client.country || '' });
     setIsEditingClient(false);
     setShowClientModal(true);
     setShowClientSuggestions(false);
@@ -1565,6 +1617,9 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     // otherwise 409). NEW bill on first save → no overwrite, so a typo
     // hitting an existing invoice number gets caught by the server.
     const shouldOverwrite = !!editingBill || hasBeenSaved.current;
+    // The number this bill actually ended up under: the 409 retry below can
+    // move it, and the recurring template + callers must use the real one.
+    let savedNumber = bill.id;
     try {
       await saveBill(bill, { overwrite: shouldOverwrite });
       // v1.10.24 — Follow-up: write the `credit-transferred-out` entries
@@ -1667,6 +1722,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               retryBill.data = { ...retryBill.data, details: { ...retryBill.data.details, invoiceNumber: nextNum } };
               await saveBill(retryBill, { overwrite: false });
               success = true;
+              savedNumber = nextNum;
               // Push the new number back into the form so the preview + any
               // subsequent save operate on the resolved id.
               setDetails(prev => ({ ...prev, invoiceNumber: nextNum }));
@@ -1683,11 +1739,11 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
           }
           if (!success) {
             toast(`Could not find a free invoice number after 20 attempts. Please change the number manually.`, 'error');
-            return;
+            return null;
           }
         } else {
           toast(`Invoice number ${bill.id} already exists. Change it before saving.`, 'error');
-          return;
+          return null;
         }
       } else {
         throw err;
@@ -1701,10 +1757,10 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     if (invoiceOptions.recurring?.enabled) {
       try {
         const rec = invoiceOptions.recurring;
-        const templateId = `tpl_${details.invoiceNumber}`; // stable: tied to source invoice number
+        const templateId = `tpl_${savedNumber}`; // stable: tied to source invoice number
         await saveRecurring({
           id: templateId,
-          sourceInvoiceId: details.invoiceNumber,
+          sourceInvoiceId: savedNumber,
           active: true,
           frequency: rec.frequency || 'monthly',
           interval: rec.interval || 1,
@@ -1773,6 +1829,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
         toast(warning, 'warning');
       }
     }
+    return savedNumber;
   };
 
   // Upload PDF to Google Drive if configured
@@ -1956,24 +2013,39 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     // The set collected here is DOM pixels relative to printRef.current.
     // We convert to canvas pixels below (× domToCanvasScale) once html2canvas
     // has returned and we know the true canvas.width.
+    //
+    // v1.10.70 - an edge is only offered if no row, footer block, signature
+    // block or image straddles it (see safePageBoundaries). The footer is two
+    // columns, and the gap between bank details and terms on the left ran
+    // straight through the stamp on the right: the stamp printed half on
+    // page 1 and half on page 2 (ERR-024).
     const collectRowBoundaries = (container) => {
-      const containerRect = container.getBoundingClientRect();
-      const nodes = container.querySelectorAll(
-        '.inv-table tbody tr, .inv-table thead tr, .inv-header, .inv-parties, ' +
-        '.inv-footer-block, .inv-totals, [data-pdf-page-boundary]'
-      );
-      const set = new Set([0]);
-      nodes.forEach(el => {
+      const top = container.getBoundingClientRect().top;
+      const span = (el) => {
         const r = el.getBoundingClientRect();
-        set.add(Math.max(0, r.bottom - containerRect.top));
-        set.add(Math.max(0, r.top - containerRect.top));
-      });
-      return [...set].sort((a, b) => a - b);
+        return [Math.max(0, r.top - top), Math.max(0, r.bottom - top)];
+      };
+      const edges = [0];
+      container.querySelectorAll(
+        '.inv-table tbody tr, .inv-table thead tr, .inv-header, .inv-parties, ' +
+        '.inv-footer, .inv-footer-block, .inv-signature, .inv-totals, [data-pdf-page-boundary]'
+      ).forEach(el => edges.push(...span(el)));
+      const keepWhole = [...container.querySelectorAll(
+        '.inv-table tbody tr, .inv-table thead tr, .inv-header, .inv-parties, ' +
+        // v1.10.73 - [data-pdf-page-boundary] too: the Boxed grid and Tally
+        // designs mark every block with it (signature included), and a page
+        // must end at those blocks' edges, never through one.
+        '.inv-footer-block, .inv-signature, .inv-totals, [data-pdf-page-boundary], img'
+      )].map(span);
+      return safePageBoundaries(edges, keepWhole);
     };
+    // v1.10.70 - hide the extra pages BEFORE measuring, not after. The
+    // separate-terms page sits inside the footer row, so measuring with it
+    // still visible laid the footer out differently from the capture.
+    extraPages.forEach(el => el.style.display = 'none');
     const domBoundariesPx = collectRowBoundaries(printRef.current);
     const domContainerWidth = printRef.current.getBoundingClientRect().width;
 
-    extraPages.forEach(el => el.style.display = 'none');
     const mainCanvas = await html2canvas(printRef.current, {
       ...captureOptions(printRef.current),
       onclone: (clonedDoc) => {
@@ -2079,6 +2151,26 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     // so aspect ratio stays correct after margins are applied.
     const scaledImgHeight = (mainCanvas.height * contentWidth) / mainCanvas.width;
 
+    // Test hook for tests/smoke.mjs (ERR-024): where each PDF page ends, and
+    // where the things a page must never cut through sit - all in the same
+    // DOM pixels. Read-only, and costs nothing to anyone else.
+    try {
+      const t = printRef.current.getBoundingClientRect().top;
+      const rel = (el) => { const r = el.getBoundingClientRect(); return [r.top - t, r.bottom - t]; };
+      const firstRow = printRef.current.querySelector('.inv-table tbody tr');
+      const sig = printRef.current.querySelector('.inv-signature, [data-pdf-signature]');
+      window.__lastPdfLayout = {
+        pageHeight: contentHeightMulti * domContainerWidth / contentWidth,
+        fullHeight: contentHeightFull * domContainerWidth / contentWidth,
+        total: mainCanvas.height * domContainerWidth / mainCanvas.width,
+        ends: [],
+        rowHeight: firstRow ? rel(firstRow)[1] - rel(firstRow)[0] : 0,
+        signature: sig ? rel(sig) : null,
+        blocks: [...printRef.current.querySelectorAll('.inv-footer-block')].map(rel).filter(([a, b]) => b - a > 2),
+        atoms: [...printRef.current.querySelectorAll('.inv-signature, img, [data-pdf-page-boundary]')].map(rel).filter(([a, b]) => b - a > 2),
+      };
+    } catch { /* test hook only */ }
+
     if (scaledImgHeight <= contentHeightFull + 2) {
       // Single-page fits — no cropping needed. Page 1 has no header/footer
       // bands so we can use the full page height (no v1.10.45 reserve).
@@ -2154,6 +2246,10 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
         if (safeEnd === null) safeEnd = naiveEnd;
         pageSplits.push({ start: pageStart, end: safeEnd });
         pageStart = safeEnd;
+      }
+
+      if (window.__lastPdfLayout) {
+        window.__lastPdfLayout.ends = pageSplits.slice(0, -1).map(s => s.end / domToCanvasScale);
       }
 
       // 4. For each page, crop mainCanvas → temp canvas → data URL → PDF.
@@ -2442,7 +2538,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       if (e.key === 's' || e.key === 'S') {
         if (!isMeaningfulInvoice()) return; // nothing to save
         e.preventDefault();
-        saveInvoiceToDB(true).then(() => toast('Invoice saved', 'success')).catch(() => toast('Save failed', 'error'));
+        saveInvoiceToDB().then((no) => { if (no) toast('Invoice saved', 'success'); }).catch(() => toast('Save failed', 'error'));
       } else if (e.key === 'p' || e.key === 'P') {
         e.preventDefault();
         // Defer to the next tick so the keydown doesn't race the PDF render.
@@ -2667,10 +2763,30 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   // v1.10.35 bug — a re-serialized iframe DOM diverged from the on-
   // screen render because of dropped cross-origin fonts + max-width
   // caps beating inline widths). See PrintPreviewModal.jsx for details.
+  // Save before any PDF or print is made, counting it as printed once more.
+  // A new invoice gets its real number here (the form only shows a peek until
+  // the first save), so the PDF must be built AFTER this, once the preview has
+  // re-rendered with that number. Returns the saved number, or null.
+  const saveForOutput = async () => {
+    const prevPrinted = Number(editingBill?.printedCount) || 0;
+    const no = await saveInvoiceToDB(false, {
+      printedCount: prevPrinted + 1,
+      lastPrintedAt: new Date().toISOString(),
+    });
+    if (!no) return null;
+    clearDraft();
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    return no;
+  };
+
   const executePrint = async () => {
     if (!printRef.current) return;
     setSaving(true);
     try {
+      // Printing hands the client a numbered invoice, so it is saved first,
+      // like Save & Download (it used to print without saving at all).
+      const saved = await saveForOutput();
+      if (!saved) return;
       await withPreviewOnScreen(async () => {
         try {
           // v1.10.42 — Thermal + user hasn't opted out of direct print?
@@ -2725,24 +2841,13 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     if (problem) { toast(problem, 'warning'); return; }
     try {
       setSaving(true);
+      // Save first so the PDF shows the number the invoice was saved under.
+      const savedNumber = await saveForOutput();
+      if (!savedNumber) return;
       // v1.10.26 — force preview on-screen so html2canvas can snapshot it.
-      // Wrapped around buildPDF only (the rest of the flow can happen with
-      // preview back to collapsed state).
       const pdf = await withPreviewOnScreen(() => buildPDF());
-      const fileName = `${typeConfig.prefix}_${details.invoiceNumber.replace(/\//g, '-')}.pdf`;
+      const fileName = `${typeConfig.prefix}_${savedNumber.replace(/\//g, '-')}.pdf`;
       pdf.save(fileName);
-
-      // v1.9.0 — bump print history + save. Both the local bill record and
-      // the server copy get updated so the reprint indicator + history
-      // views stay accurate. printedCount defaults to 0 and increments
-      // once per PDF generated.
-      const prevPrinted = Number(editingBill?.printedCount) || 0;
-      const printedPatch = {
-        printedCount: prevPrinted + 1,
-        lastPrintedAt: new Date().toISOString(),
-      };
-      await saveInvoiceToDB(false, printedPatch);
-      clearDraft();
 
       const pdfBlob = pdf.output('blob');
 
@@ -2797,6 +2902,11 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
 
   const exportEWayBill = () => {
     if (!profile?.gstin) { toast('Set your GSTIN in Settings first', 'warning'); return; }
+    // v1.10.74 - a blank invoice made an E-Way Bill JSON the portal rejects.
+    if (!items.some(i => (i.name || '').trim() && (i.quantity || 0) * (i.rate || 0) > 0)) {
+      toast('Add at least one item with a quantity and rate first.', 'warning');
+      return;
+    }
     // v1.10.1 — Pass taxInclusive so back-calc taxable value on line items.
     // Otherwise E-Way Bill portal rejects with `amount_mismatch` on MRP-inclusive invoices.
     const ewb = generateEWayBillJSON(profile, client, details, items, totals, invoiceType, { taxInclusive });
@@ -2815,15 +2925,15 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       <div className="generator-toolbar">
         <div className="flex gap-2 items-center">
           <button className="btn btn-secondary" onClick={handleBack}><ArrowLeft size={18} /> Back</button>
-          <HelpButton title="Invoice Generator — how to use">
+          <HelpButton title="Invoice Generator — how to use" doc="invoices">
             <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
               <li><strong>Invoice type</strong> — Tax Invoice / Proforma / Bill of Supply / Composition / Credit Note / Delivery Challan. Switching type refreshes the number to that type's counter (or your custom prefix from Print Settings).</li>
               <li><strong>Line items</strong> — start typing to auto-complete from your Products list. HSN autofills the GST rate for common codes. Click "+ Add description" for a detailed note under the item name.</li>
               <li><strong>Discount</strong> — per line: pick ₹ (fixed) or % of the line. Below the items: whole-bill discount, applied after tax.</li>
-              <li><strong>Customize</strong> — toggle columns and sections on/off, pick paper size (A4 / A5 / 58mm / 80mm thermal), change the invoice title and PDF style.</li>
-              <li><strong>Focus mode</strong> — the ▶/◀ button at the top hides the preview so the editor takes the full screen for heavy data entry.</li>
+              <li><strong>Customize</strong> — toggle columns and sections on/off, pick paper size (A4, A5, Letter, Legal, B5, thermal rolls or a custom size), currency, TDS / TCS, recurring, the invoice title and PDF style. Changes are remembered for your next invoice.</li>
+              <li><strong>Hide Preview</strong> — gives the form the full width for long invoices. Show Preview brings it back.</li>
               <li><strong>Keyboard</strong> — Ctrl+S save · Ctrl+P PDF · Ctrl+Enter add row · Ctrl+Shift+D duplicate last row · Esc close leave modal.</li>
-              <li><strong>Auto-save</strong> — every 2s once the invoice is meaningful (client + at least one item). Back button is safe if you haven't touched anything.</li>
+              <li><strong>Saving</strong> — a new invoice is stored when you first click Save, Save &amp; Download or Print. After that, changes save automatically. Leaving with unsaved changes asks first.</li>
             </ul>
           </HelpButton>
           {/* v1.10.37 — Auto-save status pill. Reported: prior plain
@@ -2844,6 +2954,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
             const label = saving ? 'Saving…'
               : saved ? 'All changes saved'
               : isDraft ? 'Draft — click to complete'
+              : (!editingBill && !hasBeenSaved.current) ? 'Not saved yet'
               : 'Ready';
             const onClick = () => {
               if (!isDraft) return;
@@ -2905,7 +3016,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
             if (problem) { toast(problem, 'warning'); return; }
             try {
               setSaving(true);
-              await saveInvoiceToDB();
+              const no = await saveInvoiceToDB();
+              if (!no) return;
               clearDraft();
               toast('Invoice saved', 'success');
             } catch (err) {
@@ -2936,7 +3048,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
             <MessageCircle size={18} /> WhatsApp
           </button>
           {(invoiceType === 'tax-invoice' || invoiceType === 'delivery-challan') && (
-            <button className="btn btn-secondary" onClick={exportEWayBill} title="Download E-Way Bill JSON for NIC portal upload">
+            <button className="btn btn-secondary" onClick={exportEWayBill} disabled={saving} title="Download E-Way Bill JSON for NIC portal upload">
               <Truck size={18} /> E-Way Bill
             </button>
           )}
@@ -2946,6 +3058,19 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               Moved here beside E-Way Bill, and this whole toolbar is now
               sticky (see .generator-toolbar), so it — and Save, Print and the
               rest — stay reachable from anywhere on a long invoice. */}
+          {/* v1.10.69 - requested (#71 item 1, @sangwanmail-eng): "Can we move
+              the Customize button so that it appears before the Show Preview
+              button?"
+              It used to sit in the Invoice Type card, which scrolls away. Here
+              it is in the sticky toolbar, next to the preview toggle it pairs
+              with - both change how the invoice looks, so both are reachable
+              from anywhere on a long invoice. The options panel it opens has
+              not moved. */}
+          <button className="btn btn-secondary" type="button"
+            onClick={() => setShowOptions(!showOptions)}
+            title={showOptions ? 'Hide the layout and column options' : 'Choose columns, sections, paper size and PDF style'}>
+            <Settings size={18} /> {showOptions ? 'Hide Options' : 'Customize'}
+          </button>
           <button className="btn btn-secondary" type="button"
             onClick={() => setPreviewCollapsed(v => !v)}
             title={previewCollapsed ? 'Show the live preview' : 'Hide the preview and use the full width for entry'}>
@@ -2956,47 +3081,33 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
 
       <div className={`split-view ${previewCollapsed ? 'split-view-focus' : ''}`}>
         <div className="editor-pane">
-          {/* Business Profile Selector — shown only if multiple profiles saved */}
-          {allProfiles.length > 1 && (
-            <div className="glass-panel p-6 mb-6">
-              <h3 className="section-title" style={{ marginBottom: '0.75rem' }}>Billing From (Business Profile)</h3>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
-                {allProfiles.map(bp => {
-                  const isSelected = (activeProfile?.businessName || profileProp?.businessName) === bp.businessName;
-                  return (
-                    <button key={bp.id} type="button"
-                      onClick={() => setActiveProfile(bp)}
-                      style={{
-                        padding: '0.5rem 1rem', borderRadius: 8, fontSize: '0.85rem', cursor: 'pointer',
-                        border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border)',
-                        background: isSelected ? 'rgba(59,130,246,0.08)' : 'var(--surface)',
-                        color: isSelected ? 'var(--primary)' : 'var(--text)',
-                        fontWeight: isSelected ? 700 : 400,
-                      }}>
-                      {bp.businessName}
-                      {bp.gstin && <span style={{ fontSize: '0.72rem', marginLeft: 6, opacity: 0.7 }}>{bp.gstin}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
+          {/* v1.10.67 (#66 item 6) — the "Billing From (Business Profile)"
+              card was removed. The company picker at the top of the sidebar
+              already sets which business an invoice belongs to; a second
+              picker here only made it possible to issue the invoice from a
+              company other than the one on screen. */}
           {/* Invoice Type */}
           <div className="glass-panel p-6 mb-6">
+            {/* v1.10.69 (#71 item 1) - Customize moved up to the sticky
+                toolbar. Two buttons doing the same thing would only raise the
+                question of whether they do. */}
             <div className="flex justify-between items-center">
               <h3 className="section-title" style={{ margin: 0 }}>Invoice Type</h3>
-              <button type="button" className="btn btn-secondary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
-                onClick={() => setShowOptions(!showOptions)}>
-                <Settings size={15} /> {showOptions ? 'Hide Options' : 'Customize'}
-              </button>
             </div>
             <div className="type-selector" style={{ marginTop: '0.75rem' }}>
               {Object.entries(INVOICE_TYPES).map(([key, val]) => (
-                <button key={key} className={`type-chip ${invoiceType === key ? 'type-chip-active' : ''}`}
+                <button key={key} type="button"
+                  className={`type-chip ${invoiceType === key ? 'type-chip-active' : ''}`}
+                  disabled={isIssuedInvoice && invoiceType !== key}
+                  title={isIssuedInvoice ? 'The type cannot change once an invoice is saved. Duplicate it to make a different document.' : val.description}
                   onClick={() => handleTypeChange(key)}>{val.label}</button>
               ))}
             </div>
+            {isIssuedInvoice && (
+              <p className="type-desc" style={{ color: 'var(--text-muted)' }}>
+                Saved as a {typeConfig?.label || invoiceType}. The type stays fixed so the number series and tax treatment keep matching what the customer already has - use Duplicate to raise a different document.
+              </p>
+            )}
             <p className="type-desc">{typeConfig?.description}</p>
 
             {/* Goods / Services / Mixed selector — drives default line-item unit
@@ -3160,19 +3271,30 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   <div className={`form-group${invoiceOptions.showTCS ? ' notice notice-warn' : ''}`} style={{ marginBottom: '0.75rem', padding: '0.6rem', borderRadius: '6px', display: 'block' }}>
                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem', cursor: 'pointer' }}>
                       <input type="checkbox" checked={!!invoiceOptions.showTCS}
-                        onChange={() => setInvoiceOptions(prev => ({ ...prev, showTCS: !prev.showTCS }))}
+                        onChange={() => setInvoiceOptions(prev => {
+                          // Turning TCS on for an invoice whose remembered section can no
+                          // longer be chosen (206C(1H)) starts from the first current one.
+                          const turningOn = !prev.showTCS;
+                          const valid = TCS_SECTIONS.some(s => s.code === prev.tcsSection);
+                          return turningOn && !valid
+                            ? { ...prev, showTCS: true, tcsSection: TCS_SECTIONS[0].code, tcsRate: TCS_SECTIONS[0].rate }
+                            : { ...prev, showTCS: turningOn };
+                        })}
                         style={{ width: 16, height: 16, accentColor: 'var(--primary)' }} />
                       <strong>TCS — Tax Collected at Source</strong>
                       <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>(Adds to invoice total)</span>
                     </label>
                     {invoiceOptions.showTCS && (
                       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.5rem', marginTop: '0.5rem' }}>
-                        <select className="form-input" value={invoiceOptions.tcsSection || '206C(1H)'}
+                        <select className="form-input" value={invoiceOptions.tcsSection || TCS_SECTIONS[0].code}
                           onChange={(e) => {
                             const code = e.target.value;
                             const section = TCS_SECTIONS.find(s => s.code === code);
                             setInvoiceOptions(prev => ({ ...prev, tcsSection: code, tcsRate: code === 'custom' ? prev.tcsRate : section?.rate ?? prev.tcsRate }));
                           }}>
+                          {REMOVED_TCS_SECTIONS[invoiceOptions.tcsSection] && (
+                            <option value={invoiceOptions.tcsSection} disabled>{REMOVED_TCS_SECTIONS[invoiceOptions.tcsSection]}</option>
+                          )}
                           {TCS_SECTIONS.map(s => <option key={s.code} value={s.code}>{s.label}</option>)}
                         </select>
                         <input type="number" step="any" min="0" max="100" className="form-input"
@@ -3323,6 +3445,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                     ['showSubtotal', 'Subtotal row'],
                     ['showAmountWords', 'Amount in words'],
                     ['showRoundOff', 'Round-off line'],
+                    ['showHsnSummary', 'HSN/SAC tax summary table'],
+                    ['showTaxInWords', 'Tax amount in words'],
                   ]},
                   { group: 'Compliance flags (India)', items: [
                     ['reverseCharge', 'Reverse Charge applies (Section 9(3)/9(4)) — recipient pays GST'],
@@ -3334,11 +3458,15 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   { group: 'Footer', items: [
                     ['showBankDetails', 'Bank details'],
                     ['showAccountLabel', 'Show "Pay via: <account>" label above bank block'],
-                    ['showUPI', 'UPI QR (India only)'],
+                    // v1.10.74 - the QR needs a rupee invoice with a UPI ID, not an Indian business.
+                    ['showUPI', 'UPI QR (rupee invoices)'],
                     ['showSignature', 'Signature block'],
                     ['showSignatoryText', 'Show "Authorized Signatory" caption'],
                     ['showTerms', 'Terms & Conditions'],
                     ['showNotes', 'Notes / Remarks'],
+                    ['showSystemGeneratedNote', 'Note: system-generated invoice, no signature or stamp required'],
+                    ['showDeclaration', 'Declaration'],
+                    ['showCustomerSeal', "\"Customer's Seal and Signature\" box (Boxed grid / Tally style)"],
                   ]},
                 ].map(section => {
                   if (section.group === '__PAPER_SIZE__') {
@@ -3426,7 +3554,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                               <span>
                                 <strong>Compact mode</strong>
                                 <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                                  Skip HSN + per-item rate line; use two-line item rows. Saves paper on long orders.
+                                  Tighter item rows, to save paper on long orders. Whether HSN and the quantity × rate line print is set in Print Settings.
                                 </span>
                               </span>
                             </label>
@@ -3438,7 +3566,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                               <span>
                                 <strong>Cut mark at bottom</strong>
                                 <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                                  Adds "— cut here —" line for auto-cutter thermal printers. Turn off if your printer feeds paper automatically.
+                                  Prints a CUT HERE line to tear against. Turn it off if your printer cuts the paper itself.
                                 </span>
                               </span>
                             </label>
@@ -3453,9 +3581,9 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                       <div className="options-grid">
                         {section.items.map(([key, label]) => {
                           // These default to OFF; everything else defaults to ON.
-                          const offByDefault = key === 'showRoundOff' || key === 'showAccountLabel'
-                            || key === 'showCess' || key === 'reverseCharge';
-                          const checked = offByDefault ? !!invoiceOptions[key] : invoiceOptions[key] !== false;
+                          // v1.10.70 - showSystemGeneratedNote added: without it the box
+                          // showed ticked while the invoice printed no note.
+                          const checked = invoiceOptionOn(invoiceOptions, key);
                           return (
                             <label key={key} className="option-toggle">
                               <input type="checkbox" checked={checked} onChange={() => toggleOption(key)} />
@@ -3467,6 +3595,14 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                     </div>
                   );
                 })}
+                {invoiceOptionOn(invoiceOptions, 'showDeclaration') && (
+                  <div className="form-group" style={{ marginTop: '0.4rem' }}>
+                    <label className="form-label" style={{ fontSize: '0.78rem' }}>Declaration text</label>
+                    <textarea className="form-input" rows={2}
+                      value={invoiceOptions.declarationText ?? DEFAULT_DECLARATION}
+                      onChange={e => setInvoiceOptions(prev => ({ ...prev, declarationText: e.target.value }))} />
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
                   <button type="button" className="btn btn-secondary"
                     onClick={() => {
@@ -3691,7 +3827,14 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   <div className="form-group">
                     <label className="form-label">{cc.taxIdLabel}</label>
                     <input type="text" className="form-input" value={client.gstin}
-                      onChange={(e) => setClient({ ...client, gstin: e.target.value.toUpperCase() })} placeholder="Optional" maxLength={20} />
+                      // v1.10.74 - drop the old hint on edit; it is re-checked on blur.
+                      onChange={(e) => { setClient({ ...client, gstin: e.target.value.toUpperCase() }); setGstinHint(null); }}
+                      onBlur={handleClientGstinBlur} placeholder="Optional" maxLength={20} />
+                    {gstinHint && (
+                      <small style={{ color: gstinHint.tone === 'warn' ? '#d97706' : '#16a34a', fontSize: '0.7rem', display: 'block', marginTop: '0.2rem' }}>
+                        {gstinHint.tone === 'warn' ? '⚠' : '✓'} {gstinHint.message}
+                      </small>
+                    )}
                   </div>
                 );
               })()}
@@ -3792,6 +3935,37 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   </div>
                 )}
               </div>
+
+              {/* v1.10.73 - order, dispatch and reference details: the boxes on a
+                  Tally-style invoice. Optional; closed unless one is filled. */}
+              {(() => {
+                const filled = ORDER_DETAIL_FIELDS.filter(f => String(details[f.key] || '').trim()).length;
+                const periodBackwards = details.periodFrom && details.periodTo && details.periodTo < details.periodFrom;
+                return (
+                  <details className="form-group full-width" open={filled > 0 || undefined}
+                    style={{ padding: '0.6rem 0.85rem', background: 'var(--bg-secondary)', borderRadius: 6 }}>
+                    <summary style={{ cursor: 'pointer', fontSize: '0.88rem', userSelect: 'none' }}>
+                      <strong>Order, dispatch &amp; reference details</strong>
+                      <span style={{ color: 'var(--text-muted)' }}> (optional{filled ? `, ${filled} filled` : ''}) - buyer's order no, vehicle no, service period, work details</span>
+                    </summary>
+                    <div className="grid grid-cols-2 gap-3" style={{ marginTop: '0.6rem' }}>
+                      {ORDER_DETAIL_FIELDS.map(f => (
+                        <div key={f.key} className={`form-group${f.wide ? ' full-width' : ''}`}>
+                          <label className="form-label" style={{ fontSize: '0.78rem' }}>{f.label}</label>
+                          <input type={f.type || 'text'} className="form-input" value={details[f.key] || ''}
+                            placeholder={f.placeholder || ''}
+                            onChange={e => setDetails({ ...details, [f.key]: e.target.value })} />
+                        </div>
+                      ))}
+                    </div>
+                    {periodBackwards && (
+                      <p style={{ margin: '0.4rem 0 0', fontSize: '0.78rem', color: 'var(--warn-text, #b45309)' }}>
+                        ⚠ The service period ends before it starts. Check the two dates.
+                      </p>
+                    )}
+                  </details>
+                );
+              })()}
             </div>
           </div>
 
@@ -3830,6 +4004,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                 onRemove={removeItem}
                 clampNonNeg={clampNonNeg}
                 isLastRow={idx === items.length - 1}
+                isOnlyRow={items.length === 1}
                 onAddRow={addItem}
               />
             ))}
@@ -3842,13 +4017,14 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               <label style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Discount on total (whole bill)</label>
               <input type="number" min="0" step="any" className="form-input"
                 value={invoiceOptions.invoiceDiscountValue || ''}
+                onFocus={(e) => e.target.select()}
                 onChange={(e) => setInvoiceOptions(prev => ({ ...prev, invoiceDiscountValue: clampNonNeg(e.target.value) }))}
                 style={{ width: 100 }} placeholder="0" />
               <select className="form-input"
                 value={invoiceOptions.invoiceDiscountType === 'percent' ? 'percent' : 'fixed'}
                 onChange={(e) => setInvoiceOptions(prev => ({ ...prev, invoiceDiscountType: e.target.value }))}
-                style={{ width: 90 }}>
-                <option value="fixed">₹ (fixed)</option>
+                style={{ width: 128 }}>
+                <option value="fixed">{currencySymbolFor(invoiceOptions.currency)} (fixed)</option>
                 <option value="percent">% of total</option>
               </select>
               <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
@@ -3874,7 +4050,11 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   { id: 'compact', label: 'Compact', hint: 'Tiny footer text — saves paper' },
                   { id: 'formatted', label: 'Formatted', hint: 'Larger readable paragraphs' },
                 ].map(mode => {
-                  const active = (invoiceOptions.termsFormatMode || 'compact') === mode.id;
+                  // v1.10.74 - same rule InvoicePreview prints with: per-invoice
+                  // choice, then Print Settings, then services -> formatted.
+                  const effectiveMode = invoiceOptions.termsFormatMode || _psPrintForRates.termsFormatMode
+                    || ((invoiceOptions.invoiceMode || 'goods') === 'services' ? 'formatted' : 'compact');
+                  const active = effectiveMode === mode.id;
                   return (
                     <button key={mode.id} type="button"
                       onClick={() => setInvoiceOptions(prev => ({ ...prev, termsFormatMode: mode.id }))}
@@ -4048,11 +4228,11 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                 borderRadius: 999,
                 overflow: 'hidden',
               }}>
-                <button type="button" title="Zoom out (Ctrl+−)"
+                <button type="button" title="Zoom out"
                   onClick={() => setPreviewZoom(z => Math.max(50, z - 10))}
                   style={{ padding: '0.25rem 0.7rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700, color: 'var(--text)', lineHeight: 1 }}>−</button>
                 <span style={{ padding: '0.25rem 0.55rem', fontSize: '0.72rem', fontWeight: 700, color: 'var(--text)', minWidth: 42, textAlign: 'center', borderLeft: '1px solid var(--border)', borderRight: '1px solid var(--border)' }}>{previewZoom}%</span>
-                <button type="button" title="Zoom in (Ctrl+=)"
+                <button type="button" title="Zoom in"
                   onClick={() => setPreviewZoom(z => Math.min(200, z + 10))}
                   style={{ padding: '0.25rem 0.7rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700, color: 'var(--text)', lineHeight: 1 }}>+</button>
               </div>
@@ -4092,7 +4272,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
             }}>
               <InvoicePreview ref={printRef} profile={profile} client={client} details={details}
                 items={items} totals={totals} invoiceType={invoiceType} customTerms={customTerms}
-                customNotes={customNotes} extraSections={extraSections} options={invoiceOptions} />
+                customNotes={customNotes} extraSections={extraSections} options={invoiceOptions}
+                cancelled={editingBill?.status === 'cancelled'} />
             </div>
           </div>
         </div>
@@ -4110,6 +4291,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
         onClose={() => setShowPrintPreview(false)}
         onPrint={executePrint}
         onDownloadPdf={generatePDF}
+        cancelled={editingBill?.status === 'cancelled'}
         profile={profile}
         client={client}
         details={details}

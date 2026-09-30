@@ -329,8 +329,17 @@ export function computeInvoiceTotals(opts) {
   // cumulative for this counterparty exceeds ₹50L. Caller passes
   // `tcsCumulativeThisYear` / `tdsCumulativeThisYear` (from a per-
   // client running total maintained in the Clients module).
-  const tcsCumBefore = Number(invoiceOptions.tcsCumulativeThisYear) || 0;
-  const tdsCumBefore = Number(invoiceOptions.tdsCumulativeThisYear) || 0;
+  //
+  // The ₹50L threshold belongs to 194Q and 206C(1H) only. Other sections
+  // (194C, 194J, 194I, 194H, 194O, 195, CGST 52, 206C(1)) have their own small
+  // thresholds or none, and the user ticks TDS/TCS when it applies, so they
+  // are worked out from rupee one. Applying ₹50L to them made TDS 0 on every
+  // ordinary 194J invoice. No section given = the threshold sections (their
+  // defaults), which keeps older saved invoices computing as before.
+  const tcsThresholded = !invoiceOptions.tcsSection || invoiceOptions.tcsSection === '206C(1H)';
+  const tdsThresholded = !invoiceOptions.tdsSection || invoiceOptions.tdsSection === '194Q';
+  const tcsCumBefore = tcsThresholded ? (Number(invoiceOptions.tcsCumulativeThisYear) || 0) : Infinity;
+  const tdsCumBefore = tdsThresholded ? (Number(invoiceOptions.tdsCumulativeThisYear) || 0) : Infinity;
 
   // The base at portal-facing gross (including GST).
   const receiptIncludingGst = r2(taxableAmount + taxTotal + cessTotal);
@@ -437,6 +446,16 @@ export const INVOICE_TYPES = {
     showGST: true,
     description: 'Standard GST tax invoice',
   },
+  // v1.10.73 - a priced offer for work or supply (QUO/26-27/080 style). Like a
+  // proforma it is not a sale and never reaches GST returns; convert it to a
+  // tax invoice once the client accepts.
+  'quotation': {
+    label: 'Quotation',
+    prefix: 'QUO',
+    title: 'QUOTATION',
+    showGST: true,
+    description: 'Priced offer for work or supply — not a tax document. Convert it to a tax invoice when accepted',
+  },
   'proforma': {
     label: 'Proforma / Estimate',
     prefix: 'EST',
@@ -473,6 +492,140 @@ export const INVOICE_TYPES = {
     description: 'For goods transport, job work, or supply on approval — not a tax document',
   },
 };
+
+// v1.10.73 - optional order / dispatch / reference details on an invoice,
+// the boxes a Tally-style invoice carries. One list drives the editor and
+// every PDF design, so a field can never be typed in but not printed.
+export const ORDER_DETAIL_FIELDS = [
+  { key: 'workDetails', label: 'Work details', wide: true, placeholder: 'e.g. Supply and installation of high mast lights, scope as per annexure' },
+  { key: 'revisionNo', label: 'Revision No', placeholder: 'e.g. Rev-1' },
+  { key: 'vehicleNo', label: 'Vehicle No', placeholder: 'e.g. TS09AB1234' },
+  { key: 'periodFrom', label: 'Service period from', type: 'date' },
+  { key: 'periodTo', label: 'Service period to', type: 'date' },
+  { key: 'buyerOrderNo', label: "Buyer's Order No", placeholder: 'PO / work order number' },
+  { key: 'buyerOrderDate', label: 'Order date', type: 'date' },
+  { key: 'referenceNo', label: 'Reference No & Date' },
+  { key: 'otherReferences', label: 'Other references' },
+  { key: 'deliveryNote', label: 'Delivery Note' },
+  { key: 'deliveryNoteDate', label: 'Delivery note date', type: 'date' },
+  { key: 'dispatchDocNo', label: 'Dispatch Doc No' },
+  { key: 'dispatchedThrough', label: 'Dispatched through', placeholder: 'e.g. VRL Logistics, by road' },
+  { key: 'destination', label: 'Destination' },
+  { key: 'paymentTerms', label: 'Mode / Terms of payment', placeholder: 'e.g. 30 days, NEFT' },
+  { key: 'deliveryTerms', label: 'Terms of delivery', wide: true },
+];
+// Whether a Customize option is on. Most are on unless switched off; a few are
+// off unless chosen; the Tally-style extras are on by default only in that
+// design. The Customize panel and the printed invoice both use this, so a tick
+// box can never show one thing while the invoice prints another (and the first
+// click always flips what you see - it used to take two clicks for options
+// that had never been saved).
+export const OPTIONS_OFF_BY_DEFAULT = ['showRoundOff', 'showAccountLabel', 'showCess', 'reverseCharge', 'showSystemGeneratedNote'];
+export const OPTIONS_ON_FOR_TALLY = ['showHsnSummary', 'showTaxInWords', 'showDeclaration', 'showCustomerSeal'];
+export const invoiceOptionOn = (options, key, style = options?.pdfStyle) => {
+  const v = options?.[key];
+  if (v !== undefined && v !== null) return !!v;
+  if (OPTIONS_OFF_BY_DEFAULT.includes(key)) return false;
+  if (OPTIONS_ON_FOR_TALLY.includes(key)) return style === 'tally';
+  return true;
+};
+export const DEFAULT_DECLARATION = 'We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.';
+
+// dd-Mon-yy for printing (31-Aug-26), the way Tally prints dates.
+export const formatShortDate = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '-');
+};
+// The filled-in order details, ready to print as label / value pairs.
+export const filledOrderDetails = (details = {}) => ORDER_DETAIL_FIELDS
+  .filter((f) => String(details[f.key] || '').trim())
+  .map((f) => ({ ...f, value: f.type === 'date' ? formatShortDate(details[f.key]) : String(details[f.key]).trim() }));
+
+// v1.10.70 - where a PDF page is allowed to end.
+//
+// `edges` are candidate y positions (the tops and bottoms of table rows and
+// footer blocks). `keepWhole` are [top, bottom] spans a page edge must never
+// pass through. An edge that is safe in one column is not safe in the column
+// beside it: the invoice footer puts bank details and terms on the left and
+// the signature and stamp on the right, so the gap between bank details and
+// terms runs straight through the stamp. The page broke there, printing the
+// top of the stamp at the foot of page 1 and the rest on page 2 (ERR-024).
+export const safePageBoundaries = (edges, keepWhole) => {
+  const spans = (keepWhole || []).filter(([t, b]) => b - t > 2);
+  const inside = (y) => spans.some(([t, b]) => y > t + 1 && y < b - 1);
+  return [...new Set(edges)].filter((y) => !inside(y)).sort((a, b) => a - b);
+};
+
+// v1.10.67 (#66 item 7, @sangwanmail-eng) — which documents are actual sales.
+// A proforma/estimate is only a quote and a delivery challan moves goods
+// without selling them, so neither is turnover. A credit note reduces it. A
+// cancelled document counts for nothing at all (#66 item 12).
+export const SALES_INVOICE_TYPES = ['tax-invoice', 'bill-of-supply', 'composition'];
+export const isCancelledBill = (bill) => (bill?.status || '') === 'cancelled';
+export const countsAsSales = (bill) => !isCancelledBill(bill)
+  && SALES_INVOICE_TYPES.includes(bill?.invoiceType || 'tax-invoice');
+export const isCreditNote = (bill) => (bill?.invoiceType || '') === 'credit-note'
+  && !isCancelledBill(bill);
+// +1 for a sale, -1 for a credit note, 0 for quotes, challans and anything cancelled.
+export const salesSign = (bill) => (countsAsSales(bill) ? 1 : (isCreditNote(bill) ? -1 : 0));
+
+// What this client has already been billed in the financial year of
+// `invoiceDate` (sales only, rupees, including GST), for the ₹50L threshold of
+// sections 194Q / 206C(1H). `excludeId` leaves out the invoice being edited.
+// Used by the invoice screen and the server's recurring invoices, so both
+// count the same way (the invoice screen used to always pass 0, which made
+// TCS/TDS 0 on any invoice under ₹50L however much the client had bought).
+export const clientYearToDate = (bills, clientName, invoiceDate, excludeId = null) => {
+  const name = String(clientName || '').trim().toLowerCase();
+  if (!name) return 0;
+  const fy = getFinancialYearLabel(invoiceDate ? new Date(invoiceDate) : new Date());
+  return (bills || []).reduce((sum, b) => {
+    if (!b || b.id === excludeId || !countsAsSales(b)) return sum;
+    if ((b.currency || 'INR') !== 'INR') return sum;
+    if (String(b.clientName || '').trim().toLowerCase() !== name) return sum;
+    if (!b.invoiceDate || getFinancialYearLabel(new Date(b.invoiceDate)) !== fy) return sum;
+    return sum + (Number(b.totalAmount) || 0);
+  }, 0);
+};
+
+// Marking an invoice Paid by hand: record a payment for whatever is still
+// owed, so payment history, receipts and reports agree with the status. Used
+// by the Dashboard and the Clients screen (Clients used to set the paid amount
+// only, with no payment). The id gives the payment a real receipt number.
+export const markPaidPatch = (bill, note = 'Marked paid') => {
+  const payments = Array.isArray(bill.payments) ? bill.payments : [];
+  const already = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const outstanding = Math.max(0, (Number(bill.totalAmount) || 0) - already);
+  const now = new Date();
+  return {
+    paidAmount: Number(bill.totalAmount) || 0,
+    payments: outstanding > 0.005
+      ? [...payments, { id: `pay_${now.getTime()}`, amount: Math.round(outstanding * 100) / 100, date: now.toISOString().split('T')[0], mode: 'other', note, recordedAt: now.toISOString() }]
+      : payments,
+  };
+};
+
+// The online documentation. Help buttons link straight to the section for
+// their screen; the built-in User Guide stays as the offline fallback. The
+// build of docs-site checks that every doc="page#section" used in src exists.
+export const DOCS_URL = 'https://dicecodes.com/free-gst-software-documentation/';
+export const docsLink = (doc = '') => {
+  const [page, section] = String(doc).split('#');
+  if (!page || page === 'index') return DOCS_URL + (section ? `#${section}` : '');
+  return `${DOCS_URL}${page}.html${section ? `#${section}` : ''}`;
+};
+
+// GSTR-1 B2C Large: an inter-state sale to an unregistered buyer above this
+// invoice value is reported invoice by invoice. The limit fell from ₹2.5 lakh
+// to ₹1 lakh for invoices from 1 August 2024 (Notification 12/2024-CT).
+export const b2clThreshold = (invoiceDate) =>
+  (String(invoiceDate || '') >= '2024-08-01' ? 100000 : 250000);
+
+// GST rates the GST portal accepts in GSTR-1. 40% is the GST 2.0 rate from
+// 22 Sep 2025; 12% and 28% stay for older invoices and the items still taxed so.
+export const GST_PORTAL_RATES = [0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40];
 
 // Indian states list for dropdowns
 export const INDIAN_STATES = [
@@ -526,7 +679,7 @@ export const getStatesForCountry = (countryName) => {
 // taxRates: common rates for that country's tax dropdown (always allow custom entry)
 // taxIdRegex: optional pattern for soft validation (warning only, never blocks save)
 export const COUNTRIES = [
-  { name: 'India', code: 'IN', currency: 'INR', currencySymbol: '₹', taxLabel: 'GST', taxIdLabel: 'GSTIN', taxIdPlaceholder: '22AAAAA0000A1Z5', bankLabel: 'IFSC Code', postalLabel: 'PIN Code', stateLabel: 'State', hasStates: true, taxRates: [0, 0.1, 0.25, 3, 5, 12, 18, 28], taxIdRegex: /^\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z][A-Z\d]$/ },
+  { name: 'India', code: 'IN', currency: 'INR', currencySymbol: '₹', taxLabel: 'GST', taxIdLabel: 'GSTIN', taxIdPlaceholder: '22AAAAA0000A1Z5', bankLabel: 'IFSC Code', postalLabel: 'PIN Code', stateLabel: 'State', hasStates: true, taxRates: [0, 0.1, 0.25, 3, 5, 12, 18, 28, 40], taxIdRegex: /^\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z][A-Z\d]$/ },
   { name: 'United Arab Emirates', code: 'AE', currency: 'AED', currencySymbol: 'AED', taxLabel: 'VAT', taxIdLabel: 'TRN', taxIdPlaceholder: '100123456700003', bankLabel: 'IBAN', postalLabel: 'Postal Code', stateLabel: 'Emirate', hasStates: false, taxRates: [0, 5], taxIdRegex: /^\d{15}$/ },
   { name: 'United States', code: 'US', currency: 'USD', currencySymbol: '$', taxLabel: 'Sales Tax', taxIdLabel: 'EIN / TIN', taxIdPlaceholder: '12-3456789', bankLabel: 'Routing Number', postalLabel: 'ZIP Code', stateLabel: 'State', hasStates: false, taxRates: [0, 4, 6, 7, 8, 9, 10], taxIdRegex: /^\d{2}-?\d{7}$/ },
   { name: 'United Kingdom', code: 'GB', currency: 'GBP', currencySymbol: '£', taxLabel: 'VAT', taxIdLabel: 'VAT Number', taxIdPlaceholder: 'GB123456789', bankLabel: 'Sort Code', postalLabel: 'Postcode', stateLabel: 'County', hasStates: false, taxRates: [0, 5, 20], taxIdRegex: /^GB\d{9}(\d{3})?$/i },
@@ -587,6 +740,56 @@ const GST_STATE_CODES = {
   'telangana': '36', 'ladakh': '38',
 };
 
+// v1.10.68 (#68, idea from @deppen12) — a GSTIN carries its own facts, so the
+// state can be filled in and a typo caught without any API key or internet:
+//   27 ABCDE1234F 2 Z 5
+//   |  |          | | +- checksum over the first 14 characters
+//   |  |          | +--- Z for a regular taxpayer (D = TDS, C = TCS)
+//   |  |          +----- which registration of that PAN in that state
+//   |  +---------------- the PAN, whose 4th letter is the kind of entity
+//   +------------------- the state (2011 census code)
+const GSTIN_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const PAN_ENTITY_TYPES = {
+  P: 'Individual', C: 'Company', F: 'Firm / LLP', H: 'HUF', A: 'Association of persons',
+  T: 'Trust', B: 'Body of individuals', L: 'Local authority', J: 'Artificial juridical person',
+  G: 'Government',
+};
+const GSTIN_TAXPAYER_TYPES = { Z: 'Regular', D: 'TDS deductor', C: 'TCS collector' };
+
+// Luhn mod 36 over the first 14 characters. Verified against real GSTINs:
+// it rejects a single mistyped or transposed character, which is the whole
+// point — a wrong GSTIN is only discovered when the return is rejected.
+export const gstinChecksumOk = (value) => {
+  const gstin = String(value || '').trim().toUpperCase();
+  if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z][A-Z][0-9A-Z]$/.test(gstin)) return false;
+  let sum = 0;
+  for (let i = 0; i < 14; i += 1) {
+    const product = GSTIN_CHARS.indexOf(gstin[i]) * (i % 2 ? 2 : 1);
+    sum += Math.floor(product / 36) + (product % 36);
+  }
+  return GSTIN_CHARS[(36 - (sum % 36)) % 36] === gstin[14];
+};
+
+// Everything the number itself says. `state` is null for a code we do not
+// know (96/97/99 are used for foreign country, other territory and centre
+// jurisdiction), so callers can tell "unknown" from "wrong".
+export const decodeGstin = (value) => {
+  const gstin = String(value || '').trim().toUpperCase();
+  if (gstin.length !== 15) return null;
+  const stateCode = gstin.slice(0, 2);
+  const pan = gstin.slice(2, 12);
+  return {
+    gstin,
+    stateCode,
+    state: stateNameForCode(stateCode),
+    pan,
+    entityType: PAN_ENTITY_TYPES[pan[3]] || null,
+    registration: gstin[12],
+    taxpayerType: GSTIN_TAXPAYER_TYPES[gstin[13]] || null,
+    checksumOk: gstinChecksumOk(gstin),
+  };
+};
+
 // v1.10.31 — GST-H1: legacy codes normalized.
 // AP was reorganised in June 2014; old GSTINs with prefix `28` (before
 // bifurcation) should map to the current code `37` (Andhra Pradesh).
@@ -594,6 +797,16 @@ const GST_STATE_CODES = {
 // Without normalisation, a `28ABCDE…` GSTIN and the current state "Andhra
 // Pradesh" produced different codes → interstate/intrastate mis-classification.
 const LEGACY_STATE_CODE_MAP = { '28': '37', '25': '26' };
+
+// v1.10.68 — code -> state name. Built from INDIAN_STATES so the value is
+// spelled exactly like the entry in the State dropdown: a title-cased copy
+// would read "Dadra And Nagar Haveli..." and match no option at all.
+const STATE_NAME_BY_CODE = INDIAN_STATES.reduce((acc, name) => {
+  const code = GST_STATE_CODES[name.trim().toLowerCase()];
+  if (code && !acc[code]) acc[code] = name;
+  return acc;
+}, {});
+export const stateNameForCode = (code) => STATE_NAME_BY_CODE[String(code || '').trim()] || null;
 
 // Get 2-digit GST state code from state name or GSTIN
 export const getStateCode = (stateOrGstin) => {
@@ -1205,8 +1418,8 @@ export const BUILTIN_UNITS = [
 // doesn't have to flip the unit dropdown 90% of the time.
 export const getDefaultUnitForMode = (mode) => {
   if (mode === 'services') return 'Hrs';
-  if (mode === 'mixed') return 'Nos';
-  return 'Nos'; // goods (default)
+  if (mode === 'mixed') return 'Pcs';
+  return 'Pcs'; // goods (default) - #66 item 2
 };
 
 // Filter units by invoice mode for the dropdown. Service mode hides
@@ -1708,8 +1921,12 @@ export const TDS_SECTIONS = [
 
 // TCS (Section 206C) is collected BY the seller from the buyer and added to the
 // invoice total. Common cases:
+//
+// v1.10.73 - 206C(1H) (TCS on sale of goods) was omitted from 1 April 2025 by
+// the Finance Act 2025, so new invoices can no longer pick it. Invoices saved
+// with it keep it and reprint unchanged (see REMOVED_TCS_SECTIONS).
+export const REMOVED_TCS_SECTIONS = { '206C(1H)': '206C(1H) — removed from 1 April 2025 (older invoices only)' };
 export const TCS_SECTIONS = [
-  { code: '206C(1H)', label: '206C(1H) — Sale of goods (seller turnover > ₹10cr)', rate: 0.1 },
   { code: '52',       label: 'CGST 52 — E-commerce operator', rate: 1 },
   { code: '206C(1)',  label: '206C(1) — Tendu leaves / scrap / minerals (varies)', rate: 1 },
   { code: 'custom',   label: 'Custom rate', rate: 0 },

@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
-import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, TrendingUp, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, StickyNote, Send, Package, Download, Printer } from 'lucide-react';
+import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, TrendingUp, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, StickyNote, Send, Package, Download, Printer, Ban } from 'lucide-react';
 import HelpButton from './HelpButton';
-import { getAllBills, deleteBill, saveBill, getAllProducts, saveProduct, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts } from '../store';
-import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords, belongsToProfile } from '../utils';
+import { getAllBills, saveBill, getAllProducts, saveProduct, getProfile, getAllClients, getStockAlertSettings, saveReceipt, deleteReceipt, getAllReceipts } from '../store';
+import { formatCurrency, INVOICE_TYPES, getFYOptions, numberToWords, belongsToProfile, salesSign, isCancelledBill, markPaidPatch } from '../utils';
 import { openWhatsAppShare } from '../utils/share';
 import PageHeader from './PageHeader';
 import { toast } from './Toast';
@@ -20,7 +20,18 @@ const STATUS_CONFIG = {
   partial: { label: 'Partial', icon: Clock,          color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.14)' },
   paid:    { label: 'Paid',    icon: CheckCircle,    color: '#059669', bg: 'rgba(5, 150, 105, 0.14)'  },
   overdue: { label: 'Overdue', icon: AlertTriangle,  color: '#dc2626', bg: 'rgba(220, 38, 38, 0.14)'  },
+  // v1.10.67 (#66 item 12) — a cancelled document keeps its number but counts
+  // for nothing. Picking any other status here un-cancels it.
+  cancelled: { label: 'Cancelled', icon: Ban, color: '#64748b', bg: 'rgba(100, 116, 139, 0.16)' },
 };
+
+// v1.10.74 - one list for the Record Payment mode select and its Payment
+// History, so history shows "Bank Transfer" instead of "bank-transfer".
+const PAYMENT_MODES = [
+  ['bank-transfer', 'Bank Transfer'], ['upi', 'UPI'], ['cash', 'Cash'],
+  ['cheque', 'Cheque'], ['card', 'Card'], ['other', 'Other'],
+];
+const paymentModeName = (mode) => (PAYMENT_MODES.find(([v]) => v === mode) || [])[1] || mode;
 
 // v1.10.6 — audit L4: was a local copy of getFYOptions. Now imported
 // from ../utils so a bugfix touches one file, not five.
@@ -143,7 +154,7 @@ function ReceiptModal({ target, onClose }) {
   );
 }
 
-export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpenProducts, activeProfile }) {
+export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpenProducts, onOpenSettings, onOpenGuide, activeProfile }) {
   // v1.10.64 — requested (#55, @sangwanmail-eng): "An invoice belonging to one
   // company should not appear under the other."
   //
@@ -182,15 +193,23 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
   // Outstanding and the invoice count added up EVERY company's invoices while
   // the table underneath showed only one.
   const stats = useMemo(() => {
+    // v1.10.67 (#66 item 7, @sangwanmail-eng) — these cards are turnover, so
+    // only real sales count. A proforma is a quote, a delivery challan moves
+    // goods without selling them, a credit note takes money back, and a
+    // cancelled document counts for nothing.
     const byCurrency = {};
+    let count = 0;
     for (const b of bills) {
+      const sign = salesSign(b);
+      if (sign === 0) continue;
+      count += 1;
       const cur = b.currency || b.data?.invoiceOptions?.currency || 'INR';
       if (!byCurrency[cur]) byCurrency[cur] = { total: 0, tax: 0, unpaid: 0 };
-      byCurrency[cur].total += b.totalAmount || 0;
-      byCurrency[cur].tax += b.totalTaxAmount || 0;
-      if (b.status !== 'paid') byCurrency[cur].unpaid += (b.totalAmount || 0) - (b.paidAmount || 0);
+      byCurrency[cur].total += sign * (b.totalAmount || 0);
+      byCurrency[cur].tax += sign * (b.totalTaxAmount || 0);
+      if (sign > 0 && b.status !== 'paid') byCurrency[cur].unpaid += (b.totalAmount || 0) - (b.paidAmount || 0);
     }
-    return { byCurrency, count: bills.length };
+    return { byCurrency, count };
   }, [bills]);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -203,6 +222,15 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
   // elsewhere. Cleared whenever filters change so the user doesn't accidentally
   // bulk-act on bills they can no longer see.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  // v1.10.74 - the comment above was never wired up, so bulk actions could hit
+  // ticked rows hidden by a filter. Reset during render (React's "adjust state
+  // on prop change" pattern) when any filter changes.
+  const filterKey = [search, typeFilter, statusFilter, fyFilter, dateFrom, dateTo].join('|');
+  const [selectionFilterKey, setSelectionFilterKey] = useState(filterKey);
+  if (selectionFilterKey !== filterKey) {
+    setSelectionFilterKey(filterKey);
+    if (selectedIds.size) setSelectedIds(new Set());
+  }
   // v1.9.4 — column picker. Persist to localStorage. Default set matches
   // the pre-v1.9.4 hardcoded columns so no visual change on upgrade.
   const [visibleColumns, setVisibleColumns] = useState(() => {
@@ -231,6 +259,10 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
   const [paymentInput, setPaymentInput] = useState({ amount: '', date: '', mode: 'bank-transfer', note: '' });
   const [showRemindAll, setShowRemindAll] = useState(false);
   const [clients, setClients] = useState([]);
+  const [productCount, setProductCount] = useState(null);   // null = not loaded yet
+  const [guideDismissed, setGuideDismissed] = useState(() => {
+    try { return localStorage.getItem('freegstbill_startedDismissed') === '1'; } catch { return false; }
+  });
   const [lowStockProducts, setLowStockProducts] = useState([]);
 
   // v1.10.4 — audit M14. getFYOptions is date-based (only changes across
@@ -329,7 +361,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
       // allSettled so one slow save can't block the rest.
       const dirty = data.filter(bill => {
         const dueDate = bill.data?.details?.dueDate;
-        return dueDate && dueDate < today && bill.status !== 'paid' && bill.status !== 'overdue';
+        return dueDate && dueDate < today && bill.status !== 'paid' && bill.status !== 'overdue' && bill.status !== 'cancelled';
       });
       if (dirty.length > 0) {
         const updates = dirty.map(bill => { bill.status = 'overdue'; return saveBill(bill, { overwrite: true }); });
@@ -353,6 +385,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
       getAllProducts().catch(() => []),
       getStockAlertSettings().catch(() => ({ enabled: true, threshold: 5 })),
     ]).then(([prods, cfg]) => {
+      setProductCount(prods.length);
       if (cfg?.enabled === false) { setLowStockProducts([]); return; }
       const threshold = Number(cfg?.threshold ?? 5);
       setLowStockProducts(prods.filter(p => (p.stock ?? 0) <= threshold));
@@ -379,36 +412,44 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
     setFiltered(result);
   }, [bills, search, typeFilter, statusFilter, fyFilter, dateFrom, dateTo]);
 
-  const handleDelete = async (bill) => {
+  // v1.10.67 (#66 item 12, @sangwanmail-eng) — an issued invoice is not
+  // deleted: its number has to stay in the books, gapless, for GST. Cancelling
+  // keeps the document and takes it out of every total and return. Any other
+  // status from the dropdown brings it back.
+  // Put an invoice's stock back (+1, on cancel) or take it out again (-1, on
+  // un-cancel). One place for the single-row and bulk paths: bulk cancel used
+  // to skip this, so stock went missing for invoices cancelled in bulk.
+  const adjustStockForBills = async (billList, sign) => {
+    const delta = new Map();
+    for (const b of billList) {
+      for (const item of b.data?.items || []) {
+        if (!item.productId) continue;
+        delta.set(item.productId, (delta.get(item.productId) || 0) + sign * (Number(item.quantity) || 0));
+      }
+    }
+    if (!delta.size) return;
+    const products = await getAllProducts();
+    for (const [pid, d] of delta) {
+      const product = products.find(p => p.id === pid);
+      if (product) await saveProduct({ ...product, stock: (Number(product.stock) || 0) + d });
+    }
+  };
+
+  const handleCancelInvoice = async (bill) => {
+    if (isCancelledBill(bill)) return;
     const ok = await confirmAction({
-      title: 'Delete this invoice?',
-      message: `Invoice ${bill.invoiceNumber} for ${bill.clientName} will be soft-deleted (moved to Trash for 30 days). Stock will be restored for any products in this invoice.`,
-      confirmLabel: 'Delete',
+      title: 'Cancel this invoice?',
+      message: `Invoice ${bill.invoiceNumber} for ${bill.clientName} keeps its number but stops counting in totals, reports and GST returns. Stock is restored for any products on it. You can undo this from the status dropdown.`,
+      confirmLabel: 'Cancel invoice',
       tone: 'danger',
     });
     if (ok) {
       try {
-        // Restore stock for products used in this invoice
-        if (bill.data?.items) {
-          const products = await getAllProducts();
-          for (const item of bill.data.items) {
-            if (!item.productId) continue;
-            const product = products.find(p => p.id === item.productId);
-            if (!product) continue;
-            await saveProduct({ ...product, stock: (product.stock || 0) + (item.quantity || 0) });
-          }
-        }
-        await deleteBill(bill.id);
-
-        // Move saved PDF to Trash folder
-        const prefix = { 'tax-invoice': 'INV', 'proforma': 'PRO', 'credit-note': 'CN', 'bill-of-supply': 'BOS', 'delivery-challan': 'DC' }[bill.invoiceType || 'tax-invoice'] || 'INV';
-        const pdfName = `${prefix}_${(bill.invoiceNumber || '').replace(/\//g, '-')}.pdf`;
-        const clientName = bill.clientName || bill.data?.client?.name || 'General';
-        fetch('/api/trash-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileName: pdfName, clientName }) }).catch(err => console.warn('Could not trash PDF:', err));
-
-        toast('Invoice deleted & stock restored', 'success');
+        await adjustStockForBills([bill], +1);
+        await saveBill({ ...bill, status: 'cancelled', cancelledAt: new Date().toISOString() }, { overwrite: true });
+        toast('Invoice cancelled & stock restored', 'success');
         loadBills();
-      } catch { toast('Failed to delete', 'error'); }
+      } catch { toast('Failed to cancel', 'error'); }
     }
   };
 
@@ -419,23 +460,17 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
 
   const changeStatus = async (bill, newStatus) => {
     const updated = { ...bill, status: newStatus };
+    // v1.10.67 (#66 item 12) — cancelling restores the stock on the invoice, so
+    // bringing the invoice back has to take it out again. Without this the
+    // stock count climbs by one invoice every cancel/un-cancel round trip.
+    if (isCancelledBill(bill) && newStatus !== 'cancelled' && bill.data?.items?.length) {
+      try { await adjustStockForBills([bill], -1); } catch { /* non-fatal: the status change still applies */ }
+      delete updated.cancelledAt;
+    }
     if (newStatus === 'paid') {
-      updated.paidAmount = bill.totalAmount;
-      // When flipping to paid via the row menu, also push a synthetic payment
-      // so the payment-history modal and ReportsView cashflow both reflect
-      // it. Without this, "Mark as Paid" left `payments: []` and the two
-      // reports disagreed with the bill's status.
-      const already = (bill.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
-      const outstanding = Math.max(0, Number(bill.totalAmount) - already);
-      if (outstanding > 0) {
-        updated.payments = [...(bill.payments || []), {
-          amount: outstanding,
-          date: new Date().toISOString().split('T')[0],
-          mode: 'other',
-          note: 'Marked paid',
-          recordedAt: new Date().toISOString(),
-        }];
-      }
+      // Also records a payment for the balance, so payment history and
+      // reports agree with the status (see markPaidPatch).
+      Object.assign(updated, markPaidPatch(bill));
     }
     await saveBill(updated, { overwrite: true });
     toast(`Marked as ${STATUS_CONFIG[newStatus].label}`, 'info');
@@ -448,6 +483,12 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
   };
 
   const recordPayment = async () => {
+    // v1.10.74 - a payment used to flip a cancelled invoice to paid/partial
+    // without taking its stock back out. Block it; un-cancel from the status
+    // dropdown first (that path fixes stock).
+    if (isCancelledBill(paymentModal)) {
+      toast('This invoice is cancelled. Change its status back before recording a payment.', 'warning'); return;
+    }
     const amount = parseFloat(paymentInput.amount);
     if (!isFinite(amount) || amount <= 0) {
       toast('Enter a positive payment amount', 'warning'); return;
@@ -650,32 +691,24 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
     const sel = getSelectedBills();
     if (sel.length === 0) return;
     if (!await confirmAction({
-      title: `Mark ${sel.length} invoice${sel.length !== 1 ? 's' : ''} as ${newStatus}?`,
+      title: `Mark ${sel.length} invoice${sel.length !== 1 ? 's' : ''} as ${STATUS_CONFIG[newStatus]?.label || newStatus}?`,
       message: newStatus === 'paid'
-        ? 'A synthetic payment will be recorded for each so payment history + cashflow stay consistent.'
+        ? 'A payment for the balance is recorded on each, so payment history and reports stay right.'
         : 'The status change is reversible — you can flip it back any time.',
-      confirmLabel: `Mark as ${newStatus}`,
+      confirmLabel: `Mark as ${STATUS_CONFIG[newStatus]?.label || newStatus}`,
     })) return;
     setBulkBusy(true);
     try {
       // Bulk mark-paid must push synthetic payments per bill so payment
        // history and cashflow stay consistent — see changeStatus above for
        // the same fix on the single-row path (P1 #18).
-      const nowIso = new Date().toISOString();
-      const today = nowIso.slice(0, 10);
+      // Invoices being brought back from Cancelled take their stock out
+      // again, as on the single-row dropdown.
+      await adjustStockForBills(sel.filter(isCancelledBill), -1);
       const updates = sel.map(b => {
         const patch = { ...b, status: newStatus };
-        if (newStatus === 'paid') {
-          patch.paidAmount = b.totalAmount || 0;
-          const already = (b.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
-          const outstanding = Math.max(0, Number(b.totalAmount) - already);
-          if (outstanding > 0) {
-            patch.payments = [...(b.payments || []), {
-              amount: outstanding, date: today, mode: 'other',
-              note: 'Marked paid (bulk)', recordedAt: nowIso,
-            }];
-          }
-        }
+        delete patch.cancelledAt;
+        if (newStatus === 'paid') Object.assign(patch, markPaidPatch(b, 'Marked paid (bulk)'));
         return saveBill(patch, { overwrite: true });
       });
       const results = await Promise.allSettled(updates);
@@ -688,24 +721,26 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
     setBulkBusy(false);
   };
 
-  const bulkDelete = async () => {
-    const sel = getSelectedBills();
+  const bulkCancel = async () => {
+    const sel = getSelectedBills().filter(b => !isCancelledBill(b));
     if (sel.length === 0) return;
     if (!await confirmAction({
-      title: `Delete ${sel.length} invoice${sel.length !== 1 ? 's' : ''}?`,
-      message: 'The invoices will be moved to Trash for 30 days. The PDF copies in Saved Invoices/ stay untouched.',
-      confirmLabel: `Delete ${sel.length}`,
+      title: `Cancel ${sel.length} invoice${sel.length !== 1 ? 's' : ''}?`,
+      message: 'They keep their numbers but stop counting in totals, reports and GST returns. Stock is restored for any products on them. You can undo each one from its status dropdown.',
+      confirmLabel: `Cancel ${sel.length}`,
       tone: 'danger',
     })) return;
     setBulkBusy(true);
     try {
-      const results = await Promise.allSettled(sel.map(b => deleteBill(b.id)));
+      const at = new Date().toISOString();
+      await adjustStockForBills(sel, +1);
+      const results = await Promise.allSettled(sel.map(b => saveBill({ ...b, status: 'cancelled', cancelledAt: at }, { overwrite: true })));
       const failed = results.filter(r => r.status === 'rejected').length;
-      if (failed > 0) toast(`${sel.length - failed} deleted, ${failed} failed`, 'warning');
-      else toast(`Deleted ${sel.length} invoice${sel.length !== 1 ? 's' : ''}`, 'success');
+      if (failed > 0) toast(`${sel.length - failed} cancelled, ${failed} failed`, 'warning');
+      else toast(`Cancelled ${sel.length} invoice${sel.length !== 1 ? 's' : ''}`, 'success');
       clearSelection();
       loadBills();
-    } catch (err) { toast('Bulk delete failed: ' + err.message, 'error'); }
+    } catch (err) { toast('Bulk cancel failed: ' + err.message, 'error'); }
     setBulkBusy(false);
   };
 
@@ -794,6 +829,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
             profile: data.profile, client: data.client, details: data.details, items: data.items,
             totals: data.totals, invoiceType: data.invoiceType, customTerms: data.customTerms,
             customNotes: data.customNotes, extraSections: data.extraSections, options: data.invoiceOptions,
+            cancelled: bill.status === 'cancelled',
           }));
           requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 100)));
         });
@@ -867,6 +903,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
           profile: data.profile, client: data.client, details: data.details, items: data.items,
           totals: data.totals, invoiceType: data.invoiceType, customTerms: data.customTerms,
           customNotes: data.customNotes, extraSections: data.extraSections, options: data.invoiceOptions,
+          cancelled: bill.status === 'cancelled',
         }));
         requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 100)));
       });
@@ -972,7 +1009,12 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
     const subject = `Invoice ${bill.invoiceNumber} - ${formatCurrency(bill.totalAmount, bill.currency)}`;
     const richBody = buildShareMessage(bill).replace(/\*/g, '');
     const body = `Dear ${bill.clientName},\n\n${richBody}\n\nRegards`;
-    window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`, '_blank');
+    // v1.10.74 - fill in the client's email (from the invoice, else the saved
+    // client) so the mail opens addressed. Only a plain address is used, so a
+    // stray "?" or "&" can't break the mailto link.
+    const rawTo = (bill.data?.client?.email || clients.find(c => c.name === bill.clientName)?.email || '').trim();
+    const to = /^[^\s@?&#]+@[^\s@?&#]+$/.test(rawTo) ? rawTo : '';
+    window.open(`mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`, '_blank');
   };
 
   const clearFilters = () => {
@@ -1032,6 +1074,30 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
   }, [overdueBills]);
   const overdueStr = Object.entries(overdueByCurrency).map(([cur, amt]) => formatCurrency(amt, cur)).join(' + ');
 
+  // The four things a shop owner has to do before this app is useful to them,
+  // each answered from what is actually saved - never from "did you look at
+  // this screen". null while the data is still loading, so the card cannot
+  // flash up half-ticked; null once it is all done, so it retires itself.
+  const startedSteps = useMemo(() => {
+    if (guideDismissed || productCount === null || !profile) return null;
+    const hasBank = !!(profile.paymentAccounts?.length || profile.upiId || profile.accountNumber);
+    const steps = [
+      { key: 'business', done: !!profile.businessName?.trim(),
+        title: 'Add your business details', hint: 'Name, address and GSTIN - these print on every invoice',
+        cta: 'Open Settings', go: onOpenSettings },
+      { key: 'invoice', done: allBills.length > 0,
+        title: 'Make your first invoice', hint: 'Client, what you sold, and the GST is worked out for you',
+        cta: 'Start', go: onNew },
+      { key: 'products', done: productCount > 0,
+        title: 'Add your products or services', hint: 'Saves typing - pick them from a list on every invoice',
+        cta: 'Open', go: onOpenProducts },
+      { key: 'bank', done: hasBank,
+        title: 'Add bank details or UPI', hint: 'So clients can pay you, with a UPI QR on the invoice',
+        cta: 'Open Settings', go: onOpenSettings },
+    ];
+    return steps.every(s => s.done) ? null : steps;
+  }, [guideDismissed, productCount, profile, allBills.length, onNew, onOpenProducts, onOpenSettings]);
+
   return (
     <div className="dashboard-container">
       <PageHeader
@@ -1039,19 +1105,65 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
         title="Dashboard"
         subtitle="Overview of your invoices"
         meta={`${bills.length} invoice${bills.length === 1 ? '' : 's'}`}>
-        <HelpButton title="Dashboard — how to use">
+        <HelpButton title="Dashboard — how to use" doc="dashboard">
           <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
             <li><strong>New Invoice</strong> — start a fresh tax invoice / proforma / credit note / bill of supply / delivery challan.</li>
-            <li><strong>Filter row</strong> — search by client name, invoice #, or GSTIN; filter by type / status / financial year / date range.</li>
-            <li><strong>Row actions</strong> — Edit opens the invoice; MessageCircle sends via WhatsApp; Mail opens your email client; Record Payment logs a receipt; Trash soft-deletes for 30 days.</li>
-            <li><strong>WhatsApp share — mobile vs. desktop:</strong> on Android / iPhone the PDF attaches automatically via the OS share sheet (works with WhatsApp, Signal, Telegram, anywhere). On desktop, browsers block sending files to WhatsApp Web for security — we fall back to a text-only message with all invoice details. To send the PDF from desktop: click Download, then drag the file into WhatsApp Web.</li>
-            <li><strong>Bulk actions</strong> — select rows to export as one PDF or delete in a batch.</li>
+            <li><strong>Filter row</strong> — search by client name or invoice number; filter by financial year, type, status and date range. <strong>Columns</strong> picks what the list shows.</li>
+            <li><strong>Row actions</strong> — Edit, Duplicate, ₹ Payment (records a payment and prints a receipt), WhatsApp, reminder, Email, and Cancel. Cancelling keeps the invoice number but takes it out of totals and GST returns; undo it from the status dropdown.</li>
+            <li><strong>WhatsApp share — mobile vs. desktop:</strong> on Android / iPhone the PDF attaches automatically via the OS share sheet (works with WhatsApp, Signal, Telegram, anywhere). On desktop, browsers block sending files to WhatsApp Web for security — we fall back to a text-only message with all invoice details. To send the PDF from desktop: open the invoice, click Save &amp; Download, then drag the file into WhatsApp Web.</li>
+            <li><strong>Bulk actions</strong> — tick rows to mark them paid / unpaid / overdue, export them, combine them into one PDF, or cancel them. <strong>Quick print</strong> combines the filtered list into one PDF.</li>
             <li><strong>Overdue banner</strong> — click it to jump to overdue invoices with one tap.</li>
             <li><strong>Low-stock alert</strong> — appears when any product is at or below your threshold (Settings → Stock alert).</li>
           </ul>
         </HelpButton>
         <button className="btn btn-primary" onClick={onNew}><Plus size={18} /> New Invoice</button>
       </PageHeader>
+
+      {/* v1.10.69 - a new user used to land here on "No invoices yet." and
+          nothing else. The welcome wizard does end with a list of what to do,
+          but it is shown once and then gone forever, which is no help on day
+          two. This stays until the work is actually done, ticks itself off
+          from real data rather than from "have you seen this screen", and
+          removes itself for good once everything is set up. */}
+      {startedSteps && (
+        <div className="glass-panel p-6 mb-6">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.9rem' }}>
+            <span style={{ fontSize: '1.15rem' }}>👋</span>
+            <h3 className="section-title" style={{ margin: 0, flex: 1 }}>Getting started</h3>
+            <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+              {startedSteps.filter(s => s.done).length} of {startedSteps.length} done
+            </span>
+            <button type="button" className="btn-link" title="Hide this"
+              onClick={() => { try { localStorage.setItem('freegstbill_startedDismissed', '1'); } catch { /* private mode */ } setGuideDismissed(true); }}
+              style={{ background: 'none', border: 0, color: 'var(--text-muted)', cursor: 'pointer', padding: '0 0.25rem', lineHeight: 1 }}>
+              <X size={16} />
+            </button>
+          </div>
+          {startedSteps.map((s) => (
+            <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.55rem 0', borderTop: '1px solid var(--border-color)' }}>
+              <span style={{ width: 22, height: 22, flexShrink: 0, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                background: s.done ? 'rgba(5, 150, 105, 0.16)' : 'transparent', border: s.done ? 'none' : '1.5px solid var(--border-color)' }}>
+                {s.done && <CheckCircle size={15} style={{ color: '#059669' }} />}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: '0.88rem', color: s.done ? 'var(--text-muted)' : 'var(--text-primary)', textDecoration: s.done ? 'line-through' : 'none' }}>{s.title}</div>
+                {!s.done && <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>{s.hint}</div>}
+              </div>
+              {!s.done && (
+                <button type="button" className="btn btn-secondary" onClick={s.go}
+                  style={{ flexShrink: 0, padding: '0.35rem 0.8rem', fontSize: '0.8rem' }}>{s.cta}</button>
+              )}
+            </div>
+          ))}
+          <div style={{ marginTop: '0.9rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+            New to this?{' '}
+            <button type="button" onClick={onOpenGuide}
+              style={{ background: 'none', border: 0, padding: 0, font: 'inherit', color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer' }}>
+              Read the 5-minute guide
+            </button>
+          </div>
+        </div>
+      )}
 
       {overdueBills.length > 0 && (
         <div className="overdue-banner" onClick={() => { setStatusFilter('overdue'); }}
@@ -1232,6 +1344,8 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
             <option value="partial">Partial</option>
             <option value="paid">Paid</option>
             <option value="overdue">Overdue</option>
+            {/* v1.10.74 - rows can be Cancelled, so the filter needs it too */}
+            <option value="cancelled">Cancelled</option>
           </select>
           <input type="date" className="filter-date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} title="From" />
           <input type="date" className="filter-date" value={dateTo} onChange={e => setDateTo(e.target.value)} title="To" />
@@ -1288,8 +1402,10 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
           </button>
           <button type="button" className="btn btn-secondary" disabled={bulkBusy}
             style={{ fontSize: '0.72rem', padding: '0.25rem 0.6rem' }}
-            onClick={() => bulkPrintByFilter('unpaid')}>
-            <Clock size={12} /> Unpaid ({filtered.filter(b => (b.status || 'unpaid') === 'unpaid').length})
+            onClick={() => bulkPrintByFilter('unpaid')}
+            title="Only invoices marked Unpaid (not Partial or Overdue)">
+            {/* v1.10.74 - label says "only": Partial and Overdue are not included */}
+            <Clock size={12} /> Unpaid only ({filtered.filter(b => (b.status || 'unpaid') === 'unpaid').length})
           </button>
           <button type="button" className="btn btn-secondary" disabled={bulkBusy}
             style={{ fontSize: '0.72rem', padding: '0.25rem 0.6rem' }}
@@ -1320,7 +1436,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}><AlertTriangle size={13} /> Mark overdue</button>
             <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={bulkExportJSON}
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}><FileText size={13} /> Export JSON</button>
-            <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={bulkExportPDF}
+            <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={() => bulkExportPDF()}
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }} title="Combine selected invoices into one multi-page PDF — CAs love this for filing archives"><Download size={13} /> Bulk PDF</button>
             {/* v1.10.7 — Cancel button for the in-flight bulk export. The
                  underlying abort flag was wired in v1.10.3; this is the
@@ -1333,9 +1449,9 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                 style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem', color: 'var(--warn-text)', borderColor: 'var(--warn-border)' }}
                 title="Stop the bulk export after the current invoice — partial results still get saved."><X size={13} /> Cancel</button>
             )}
-            <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={bulkDelete}
+            <button type="button" className="btn btn-secondary" disabled={bulkBusy} onClick={bulkCancel}
               style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem', color: 'var(--danger)', borderColor: 'var(--danger)' }}>
-              <Trash2 size={13} /> Delete
+              <Ban size={13} /> Cancel invoices
             </button>
             <button type="button" className="icon-btn" onClick={clearSelection} title="Clear selection" style={{ marginLeft: 'auto' }}>
               <X size={14} />
@@ -1363,14 +1479,14 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                   </th>
                   {visibleColumns.date && <th>Date</th>}
                   {visibleColumns.invoice && <th>Invoice No.</th>}
-                  {visibleColumns.type && <th>Type</th>}
+                  {visibleColumns.type && <th className="col-center">Type</th>}
                   {visibleColumns.client && <th>Client</th>}
                   {visibleColumns.amount && <th>Amount</th>}
                   {visibleColumns.currency && <th>Currency</th>}
                   {visibleColumns.dueDate && <th>Due Date</th>}
                   {visibleColumns.printed && <th>Printed</th>}
-                  <th>Paid</th>
-                  {visibleColumns.status && <th>Status</th>}
+                  <th className="col-center">Paid</th>
+                  {visibleColumns.status && <th className="col-center">Status</th>}
                   {visibleColumns.actions && <th>Actions</th>}
                 </tr>
               </thead>
@@ -1378,7 +1494,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                 {filtered.map(bill => {
                   const status = bill.status || 'unpaid';
                   const sc = STATUS_CONFIG[status] || STATUS_CONFIG.unpaid;
-                  const isOverdue = status !== 'paid' && bill.data?.details?.dueDate && new Date(bill.data.details.dueDate) < new Date();
+                  const isOverdue = status !== 'paid' && status !== 'cancelled' && bill.data?.details?.dueDate && new Date(bill.data.details.dueDate) < new Date();
                   const daysOverdue = isOverdue ? Math.floor((new Date() - new Date(bill.data.details.dueDate)) / 86400000) : 0;
                   const billCurrency = bill.currency || bill.data?.invoiceOptions?.currency || 'INR';
                   return (
@@ -1406,8 +1522,8 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                       {visibleColumns.currency && <td className="text-muted">{billCurrency}</td>}
                       {visibleColumns.dueDate && <td className="text-muted">{bill.data?.details?.dueDate ? new Date(bill.data.details.dueDate).toLocaleDateString('en-IN') : <span className="cell-empty">—</span>}</td>}
                       {visibleColumns.printed && <td className="text-muted" style={{ textAlign: 'center' }}>{Number(bill.printedCount) || 0}×</td>}
-                      <td className="text-muted">{(bill.paidAmount || 0) > 0 ? formatCurrency(bill.paidAmount, billCurrency) : <span className="cell-empty">—</span>}</td>
-                      {visibleColumns.status && <td>
+                      <td className="text-muted col-center">{(bill.paidAmount || 0) > 0 ? formatCurrency(bill.paidAmount, billCurrency) : <span className="cell-empty">—</span>}</td>
+                      {visibleColumns.status && <td className="col-center">
                         <select className="status-select" value={isOverdue && status !== 'overdue' ? 'overdue' : status}
                           style={{ background: sc.bg, color: sc.color, borderColor: sc.color + '44' }}
                           onChange={e => changeStatus(bill, e.target.value)}>
@@ -1421,10 +1537,12 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                         <div className="table-actions">
                           <button className="icon-btn icon-btn-blue" onClick={() => handleView(bill)} title="Edit"><Edit3 size={15} /></button>
                           <button className="icon-btn icon-btn-blue" onClick={() => onDuplicate(bill)} title="Duplicate"><Copy size={15} /></button>
-                          {(bill.invoiceType === 'proforma' || bill.invoiceType === 'delivery-challan') && (
+                          {['quotation', 'proforma', 'delivery-challan'].includes(bill.invoiceType) && (
                             <button className="icon-btn icon-btn-green" onClick={() => onConvert(bill)} title="Convert to Tax Invoice"><FileText size={15} /></button>
                           )}
-                          <button className="icon-btn icon-btn-green" onClick={() => openPaymentModal(bill)} title="Payment"><IndianRupee size={15} /></button>
+                          {/* v1.10.74 - kept for cancelled invoices so past payments stay viewable; saving is blocked in recordPayment */}
+                          <button className="icon-btn icon-btn-green" onClick={() => openPaymentModal(bill)}
+                            title={isCancelledBill(bill) ? 'Payment history (invoice is cancelled)' : 'Payment'}><IndianRupee size={15} /></button>
                           <button className="icon-btn icon-btn-green" onClick={() => shareWhatsApp(bill)}
                             title="Share via WhatsApp — PDF attaches on mobile Chrome/Safari. On desktop it sends the invoice as text only (browser can't attach files to WhatsApp Web — security limitation, not our app).">
                             <MessageCircle size={15} />
@@ -1435,7 +1553,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                                customer should give option to send via
                                whatsapp or email as reminder predefined side
                                of every invoice. also for partial pending too". */}
-                          {(isOverdue || status === 'overdue' || status === 'unpaid' || status === 'partial') && (bill.totalAmount || 0) - (bill.paidAmount || 0) > 0.01 && (
+                          {!isCancelledBill(bill) && (isOverdue || status === 'overdue' || status === 'unpaid' || status === 'partial') && (bill.totalAmount || 0) - (bill.paidAmount || 0) > 0.01 && (
                             <button className="icon-btn icon-btn-green"
                               onClick={() => sendReminder({ ...bill, clientPhone: getClientPhone(bill) })}
                               title={status === 'partial' ? 'Send reminder — partial pending' : (status === 'overdue' || isOverdue ? 'Send reminder — overdue' : 'Send reminder — unpaid')}
@@ -1444,7 +1562,10 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                             </button>
                           )}
                           <button className="icon-btn icon-btn-blue" onClick={() => shareEmail(bill)} title="Email"><Mail size={15} /></button>
-                          <button className="icon-btn icon-btn-red" onClick={() => handleDelete(bill)} title="Delete"><Trash2 size={15} /></button>
+                          <button className="icon-btn icon-btn-red" onClick={() => handleCancelInvoice(bill)}
+                            disabled={isCancelledBill(bill)}
+                            title={isCancelledBill(bill) ? 'Already cancelled' : 'Cancel invoice — keeps the number, undo from the status dropdown'}>
+                            <Ban size={15} /></button>
                         </div>
                       </td>}
                     </tr>
@@ -1489,12 +1610,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                 <label className="form-label">Payment Mode</label>
                 <select className="form-input" value={paymentInput.mode}
                   onChange={e => setPaymentInput(prev => ({ ...prev, mode: e.target.value }))}>
-                  <option value="bank-transfer">Bank Transfer</option>
-                  <option value="upi">UPI</option>
-                  <option value="cash">Cash</option>
-                  <option value="cheque">Cheque</option>
-                  <option value="card">Card</option>
-                  <option value="other">Other</option>
+                  {PAYMENT_MODES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
                 </select>
               </div>
               <div className="form-group">
@@ -1515,7 +1631,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpe
                     <div key={p.id || i} className="payment-row" style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
                       <span style={{ minWidth: 90 }}>{p.date ? new Date(p.date).toLocaleDateString('en-IN') : '—'}</span>
                       <span className="font-bold" style={{ minWidth: 100 }}>{formatCurrency(p.amount, paymentModal.currency)}</span>
-                      <span className="text-muted" style={{ minWidth: 90 }}>{p.mode}</span>
+                      <span className="text-muted" style={{ minWidth: 90 }}>{paymentModeName(p.mode)}</span>
                       {p.note && <span className="text-muted" style={{ flex: 1 }}>· {p.note}</span>}
                       <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.25rem' }}>
                         <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }}

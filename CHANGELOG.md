@@ -7,6 +7,844 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.74] - 2026-09-28
+
+**Forty smaller fixes found while documenting every screen: GST return
+figures, reports, receipts, purchases, expenses and more.**
+
+### How to update
+
+**Current version:** 1.10.73  →  **New version:** 1.10.74
+
+#### If the in-app Update button works for you (1.10.73 and later)
+1. Open the app and click **Update to v1.10.74** in the sidebar, or
+   **Settings → App Updates → Update Now**.
+2. Wait about a minute, then reload the page.
+
+#### On 1.10.72 or older
+Use the launcher: **More options → Update to the latest version**, then
+**Open App**.
+
+#### If that does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.74.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app (click **Stop the app** in the launcher if it is running).
+3. **Right-click the ZIP → Extract All.** Do not open anything while still inside the ZIP.
+4. Extract over your existing Free GST Billing folder, replacing files when asked.
+5. Double-click **Free GST Billing - WINDOWS**.
+
+#### Linux / NAS
+Run `update-unix.sh` from the `_system` folder, or extract the new ZIP over
+the old folder. Restart the app afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Fixed - GST returns
+- **Exports without a GSTIN were counted twice** in GSTR-3B: in 3.1(a) and the
+  B2C table as well as in 3.1(b), with their IGST added twice to the tax
+  payable. Each export is now counted once, in 3.1(b).
+- **Credit notes were added to the HSN summary** instead of subtracted.
+- Warnings (missing HSN, a GSTIN without a state) are now shown, in an amber
+  box under the errors.
+- GSTR-3B row 3.1(c) now reads "Other outward supplies (nil rated, exempted)".
+- Reverse-charge purchases in the 3B file count only the selected period; so
+  does the "Books only" list in GSTR-2B matching.
+- The JSON return period for a quarter or year is now its last month, not the
+  month of the first bill.
+- Table 3.2 handles prices that include tax correctly.
+- The Documents issued table counts cancelled documents.
+- The R1 / 3B Filed marks are kept separately for each business.
+
+### Fixed - reports and income tax
+- Losses show a minus sign instead of only a red colour.
+- Client Analytics and Product Performance have their own period choice.
+- Product revenue is after discounts and without tax, so it matches invoices.
+- 80TTA applies under 60 and 80TTB from 60, never both; the ITR-4 PDF prints
+  your PAN; 44AE heavy vehicles start at 13 tonnes; presumptive income ticks
+  the advance-tax presumptive option.
+
+### Fixed - invoices, clients, products, receipts
+- The Dashboard status filter has Cancelled; a cancelled invoice cannot take a
+  payment; payment history shows "Bank Transfer" rather than "bank-transfer";
+  ticked invoices clear when you change the filters; Email opens addressed to
+  the client.
+- Ctrl+K settings shortcuts jump to their section; Control Panel is in Ctrl+K.
+- The invoice screen shows the invoice currency (not always ₹) for discounts,
+  labels the item field "Item", disables Remove on the only line and the
+  E-Way Bill button while saving, and keeps the invoice's country when saving
+  a new client.
+- Thermal receipts print TCS, whole-bill discount, TDS and Net Receivable.
+- Client totals count only real sales, with credit notes subtracted; the Aging
+  PDF is named Aging-….pdf.
+- Products: the screen is called Products; a stock of 0 shows 0; CSV import
+  skips products and clients you already have.
+- Receipts: a receipt number you type is kept; only unpaid sales appear in
+  Quick Select; you are told when "Against Invoice" matches nothing; the
+  client address prints; a blocked pop-up is reported.
+- Purchases and expenses: today's date is your local date; "All years" filter;
+  the purchase PDF shows CGST + SGST or IGST; CSV exports include cess and
+  inter-state; reading a bill photo ticks Inter-state when the bill shows IGST;
+  the expense GST amount updates as you type.
+- Settings, first run and print settings: the Google setup hint shows your
+  real address; the invoice number preview uses the financial year; restore
+  lists everything it restored; Backup now reports errors; the first-run
+  country starts as India; hints that described the wrong default are fixed.
+
+---
+
+## [1.10.73] - 2026-09-27
+
+**Two new invoice designs, Boxed grid and Tally style; a Quotation document;
+order and dispatch details; an HSN tax summary; Help buttons that open the
+online guide.**
+
+### How to update
+
+**Current version:** 1.10.71 or older  →  **New version:** 1.10.73
+
+#### Use the launcher for this update
+Versions up to 1.10.71 cannot update themselves from inside the app (fixed
+in 1.10.72, below). Use the launcher:
+1. Open the Free GST Billing launcher.
+2. Click **More options → Update to the latest version**.
+3. Wait for it to finish, then click **Open App**.
+
+#### If the launcher update does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.73.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app (click **Stop the app** in the launcher if it is running).
+3. **Right-click the ZIP → Extract All.** Do not open anything while still inside the ZIP.
+4. Extract over your existing Free GST Billing folder, replacing files when asked.
+5. Double-click **Free GST Billing - WINDOWS**.
+
+#### Linux / NAS
+Run `update-unix.sh` from the `_system` folder, or extract the new ZIP over
+the old folder. Restart the app afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### New - two invoice designs
+Under **Customize → PDF Style** (or Settings → Print & PDF for every invoice):
+
+- **Tally style** - the layout Indian businesses and their clients know from
+  Tally: Invoice No, Delivery Note, Buyer's Order No, Dispatch Doc No,
+  Dispatched through, Destination and Terms of Delivery boxes; state names
+  with their codes; taxes and round-off inside the item table; "Amount
+  Chargeable (in words)" with E. & O.E; an HSN/SAC tax summary; the tax amount
+  in words; company PAN; a declaration; bank details; and a "Customer's Seal
+  and Signature" box beside "for your business / Authorised Signatory".
+- **Boxed grid** - every section in ruled boxes: your name large at the top,
+  seller and document details side by side, Billing To and Shipping To, a
+  Work Details line, and an item table filled with empty ruled rows to a fixed
+  height, like a printed quotation pad.
+
+Long invoices in both designs are split between rows and blocks, never
+through one, and never through the signature.
+
+### New - Quotation
+A **Quotation** document type (QUO/…), for priced offers. Like a proforma it
+is not a sale and never reaches GST returns; **Convert to Tax Invoice** on the
+Dashboard turns it into an invoice when the client accepts.
+
+### New - order, dispatch and reference details
+The invoice screen has an optional **Order, dispatch & reference details**
+section: work details, revision no, vehicle no, service period, buyer's order
+no and date, reference, delivery note, dispatch doc no, dispatched through,
+destination, payment terms and terms of delivery. Whatever you fill in prints
+on every design.
+
+### New - HSN tax summary, tax in words, declaration
+Customize has three new switches: **HSN/SAC tax summary table**, **Tax amount
+in words** and **Declaration** (with your own wording). They are on by
+default in Tally style and available in every design.
+
+### New - Help opens the full guide
+Every screen's **?** Help now has **Read the full guide**, which opens that
+screen's section of the online documentation. Eight screens that had no Help
+button have one now, and the User Guide links to the online docs.
+
+### Fixed
+- Customize tick boxes that had never been changed needed two clicks to turn
+  off. One click now always flips what you see.
+- **TCS section 206C(1H)** (TCS on sale of goods) was removed from 1 April 2025
+  by the Finance Act 2025, so new invoices no longer offer it; TCS now starts
+  on CGST section 52. Invoices already made with 206C(1H) keep it and reprint
+  unchanged.
+- On a busy or older computer, one slow reply from the app's engine replaced
+  the whole screen with "Needs a Quick Start" in the middle of your work. It
+  now waits for three missed checks in a row (about 15 seconds) first.
+
+---
+
+## [1.10.72] - 2026-09-27
+
+**The in-app Update Now, Backup, Restore, Move and Stop buttons work again
+(#73).**
+
+### How to update
+
+**Current version:** 1.10.71 or older  →  **New version:** 1.10.72
+
+#### Use the launcher for this update
+The in-app **Update Now** button is the thing this version fixes, so on your
+current version it cannot update itself. Use the launcher instead:
+1. Open the Free GST Billing launcher.
+2. Click **More options → Update to the latest version**.
+3. Wait for it to finish, then click **Open App**.
+
+From 1.10.72 on, **Update Now** inside the app works again.
+
+#### If the launcher update does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.72.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app (click **Stop the app** in the launcher if it is running).
+3. **Right-click the ZIP → Extract All.** Do not open anything while still inside the ZIP.
+4. Extract over your existing Free GST Billing folder, replacing files when asked.
+5. Double-click **Free GST Billing - WINDOWS**.
+
+#### Linux / NAS
+Run `update-unix.sh` from the `_system` folder, or extract the new ZIP over
+the old folder. Restart the app, or its container, afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` (on Linux `~/Documents/FreeGSTBill Backups/`)
+before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Fixed - "Launcher scripts not detected" (#73)
+Reported by @deppen12. The Control Panel said the launcher scripts were
+missing on every installed copy, and its Update, Backup, Restore, Move and Stop
+buttons failed with "Script not found". The Update Now button in Settings and
+in the sidebar failed the same way.
+
+The downloaded ZIP keeps these scripts in the `_system` folder, next to the
+app. The app was looking for them in a folder that the ZIP has never had. It
+now looks in the right place.
+
+On Linux and macOS, where only the update and backup scripts exist, Restore,
+Move and Stop now say **Not available here** instead of failing when clicked.
+
+---
+
+## [1.10.71] - 2026-09-24
+
+**Ten fixes found while writing the new documentation: Bulk PDF works, Print
+saves the invoice, TDS/TCS and the 40% GST rate are right, and recurring
+invoices keep their settings.**
+
+### How to update
+
+**Current version:** 1.10.70 (or 1.10.69)  →  **New version:** 1.10.71
+
+#### If the in-app Update button works for you
+1. Open the Free GST Billing launcher.
+2. Click **More options → Update to the latest version**.
+3. Wait for it to finish, then click **Open App**.
+
+That is all — your data is not touched.
+
+#### If the Update button does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.71.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app (click **Stop the app** in the launcher if it is running).
+3. **Right-click the ZIP → Extract All.** Do not open anything while still inside the ZIP.
+4. Extract over your existing Free GST Billing folder, replacing files when asked.
+5. Double-click **Free GST Billing - WINDOWS**.
+
+#### Linux / NAS
+The in-app **Control Panel → Update Now** works here too. It needs `unzip`
+(or python3). Restart the app, or its container, afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` (on Linux `~/Documents/FreeGSTBill Backups/`)
+before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Fixed - invoices
+- **Print now saves the invoice** before printing, like Save & Download. It
+  used to print a numbered invoice that was never kept.
+- **The PDF always shows the saved number.** Save & Download used to make the
+  PDF before the number was taken, so on a busy day the two could differ.
+- **"Invoice saved" only appears when it was.** After a duplicate-number error
+  it used to appear anyway.
+- **Ctrl+S and "Save & leave" take items out of stock**, as Save does.
+- The save badge says **Not saved yet** on a new invoice, instead of "All
+  changes saved".
+
+### Fixed - Dashboard and Clients
+- **Bulk PDF works.** It always said "Could not generate any PDFs".
+- **Cancelling in bulk returns stock**, as cancelling one invoice does, and
+  bringing invoices back takes it out again.
+- **Marking Paid on the Clients screen records a payment**, as the Dashboard
+  does, and its receipt gets a proper number.
+- A cancelled invoice past its due date no longer shows as Overdue.
+
+### Fixed - GST and tax
+- **40% GST rate** (GST 2.0, from 22 September 2025) is offered on invoices and
+  purchases and accepted by the GSTR-1 export. 12% and 28% stay for older
+  invoices and the items still taxed at them.
+- **B2C Large starts above ₹1 lakh** for invoices from 1 August 2024 (₹2.5 lakh
+  before), as the GST rules changed.
+- **TDS and TCS were ₹0 on most invoices.** The ₹50 lakh limit now applies
+  only to 194Q and 206C(1H), and counts the client's earlier invoices this
+  year. Other sections (194C, 194J and so on) apply from the first rupee.
+- **Reports** no longer count estimates and delivery challans as sales, and
+  subtract credit notes.
+- **Income Tax**: capital gains labels show the rates actually used (20% and
+  12.5% over ₹1.25 lakh); asks your age, your parents' age and whether you
+  are a government employee, so the right limits apply; business income
+  leaves out GST, estimates and foreign-currency invoices; the ITR-4 PDF's 80D
+  line matches the tax; "office rent" in a bank statement is an expense; a
+  statement can only be pushed to the calculator once.
+
+### Fixed - purchases, recurring, setup
+- **Deleting a purchase bill takes its stock back out**, as its message always
+  said. Removing a row while editing a bill does too.
+- **Editing a recurring template keeps all its settings.** The form now has
+  "Every" and "Stop" (never, on a date, after N invoices).
+- **Generate Now** makes exactly the same invoice as the automatic run, with the
+  tax split, and follows "every N" and the end condition. Templates with no
+  on/off setting now run, and recurring invoice numbers use the financial year.
+- The **setup wizard** keeps the language you pick, and its paper size now
+  applies to new invoices.
+- In **Settings**, the save bar no longer covers the "Jump to" buttons.
+- Help texts across the app now describe what the app really does.
+
+---
+
+## [1.10.70] - 2026-09-24
+
+**A page break could cut the company stamp in half. It now never splits the
+signature block — and you can add a "system-generated invoice" note (#72).**
+
+### How to update
+
+**Current version:** 1.10.69  →  **New version:** 1.10.70
+
+#### If the in-app Update button works for you
+1. Open the Free GST Billing launcher.
+2. Click **More options → Update to the latest version**.
+3. Wait for it to finish, then click **Open App**.
+
+That is all — your data is not touched.
+
+#### If the Update button does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.70.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app (click **Stop the app** in the launcher if it is running).
+3. **Right-click the ZIP → Extract All.** Do not open anything while still inside the ZIP.
+4. Extract over your existing Free GST Billing folder, replacing files when asked.
+5. Double-click **Free GST Billing - WINDOWS**.
+
+#### Linux / NAS
+The in-app **Control Panel → Update Now** works here too. It needs `unzip`
+(or python3). Restart the app, or its container, afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` (on Linux `~/Documents/FreeGSTBill Backups/`)
+before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Fixed - the stamp could be cut in half across two pages
+
+Reported with a photo: on a two-page invoice, the top of the company stamp
+printed at the foot of page 1 and the rest of it at the top of page 2.
+
+The bottom of an invoice is two columns side by side — bank details and terms on
+the left, the signature and stamp on the right. When an invoice runs onto a
+second page, the app looks for a clean place to end page 1, and it treated the
+gap between **bank details** and **terms** as one. On the left it is; on the
+right, that same line runs straight through the stamp.
+
+A page now only ends where nothing on *either* side is cut: not a table row,
+not a footer block, not the signature block, and not any image. When the
+signature block would straddle the page edge, the whole footer moves to the
+next page together.
+
+Tested by building exactly that invoice — enough rows to put the page edge
+inside the signature block — and making a real PDF from the old code and the
+new. Old: page 1 ended inside the signature. New: page 1 ends above the footer,
+and the footer prints whole on page 2.
+
+### Added - "system-generated invoice" note (#72)
+
+Asked for by @sangwanmail-eng: an optional line below Terms & Conditions —
+
+> **Note:** This is a system-generated invoice. No signature or stamp is required.
+
+Turn it on under **Customize → Footer**. It is off unless you choose it, since
+most invoices are signed and the line would contradict a signature.
+
+---
+
+## [1.10.69] - 2026-09-23
+
+**The Windows launcher is now the only thing you ever open: it installs the
+app, opens it by itself when the install finishes, and updates it later. It
+has an icon instead of a blank white page, explains itself in plain English,
+and says what to do when you open it from inside the ZIP. There is also a
+one-command install for anyone who prefers a terminal.**
+
+### How to update
+
+**Current version:** 1.10.68  →  **New version:** 1.10.69
+
+#### If the in-app Update button works for you
+1. Open the Free GST Billing launcher.
+2. Click **Update**.
+3. Wait for "Update complete", then click **Stop Server**, then **Open App**.
+
+That is all — your data is not touched.
+
+#### If the Update button does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.69.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app completely (click **Stop Server** first if it is running).
+3. **Right-click the ZIP → Extract All.** Do not open the launcher from inside
+   the ZIP — Windows unpacks only that one file and the app cannot start.
+4. Extract over your existing Free GST Billing folder, replacing files when asked.
+5. Double-click the launcher again.
+
+#### Linux / NAS
+The in-app **Control Panel → Update Now** works here too. It needs `unzip`
+(or python3). Restart the app, or its container, afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` (on Linux `~/Documents/FreeGSTBill Backups/`)
+before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Fixed - the launcher had no icon, so Windows drew a blank white page
+
+The launcher and the Desktop shortcut both pointed at `_system\app-icon.ico`,
+a file that was never built. Windows falls back to the generic blank-document
+icon, which on an unsigned download from the internet looks exactly like a
+corrupt file. The icon now ships in every release, so it appears on the
+launcher window, the taskbar, the Desktop and Start-Menu shortcuts, and on the
+installed folder itself.
+
+The mark is also redrawn for small sizes. The full logo is a rounded square
+inside another rounded square, with a translucent panel behind the letter -
+which reads as depth at 48 pixels and as a smudge at 16, the size Explorer
+uses in a list and Windows uses in a title bar. Below 64px the icon is now one
+solid square and one large letter: the same brand, actually legible.
+
+One limit worth writing down: a `.hta`, `.sh`, `.command` or `.txt` file cannot
+carry its own icon. Windows gives a file whatever icon its *type* is registered
+with, and only `.exe`, `.ico`, `.lnk` and folders can override that. So the
+files inside the extracted folder still show generic Windows icons - while the
+folder itself, the shortcut you actually use every day, and the app window all
+show ours.
+
+### Fixed - "the install finished but the launcher still says Install"
+
+The installer runs in its own PowerShell window, and the launcher had no way
+of knowing when it closed — so it went on offering **Install App** until it
+was closed and reopened. That looks exactly like an install that failed.
+The launcher now watches for the install to land and switches itself to
+**Open App**, and the installer opens the app in your browser the moment it
+is done, instead of leaving you at a console saying "now go and click".
+
+### Fixed - "_system folder is missing", while Explorer was showing it
+
+Windows lets you double-click a file **inside** a ZIP without extracting
+anything: it quietly copies that one file to a temp folder and runs it there,
+with nothing next to it. The launcher was telling the truth about a folder
+the user could not see. It now recognises that situation and says so —
+*"Windows opened this file straight out of the ZIP"* — with numbered steps and
+a button that opens your Downloads folder. In any other case it prints the
+folder it actually looked in, so the two can be told apart at a glance.
+
+### Fixed - "Open App" started the app but never opened the browser
+
+This one had been broken since v1.10.44 and hit every Windows user. After an
+install, or whenever you clicked **Open App**, the app started correctly and
+then a console window said *"Server did not respond in 15s"* and stopped.
+Nothing opened. Pasting `http://localhost:47371` into a browser by hand always
+worked.
+
+The script checked whether the app was up by asking it for a page with a
+one-second limit. Windows PowerShell runs a proxy look-up before every such
+request - even for an address on your own machine - and on a work network or
+a VPN that look-up alone takes about two seconds, so the check could never
+succeed. It now skips the proxy for a request that never leaves the machine:
+the same check went from "always fails" to answering in 0.03 seconds. The app
+itself was ready 0.6 seconds after starting, all along.
+
+While it was wrong, clicking **Open App** also started a *second* copy of the
+app each time, because it could not see the first one.
+
+### Fixed - "Update Now" did nothing when you clicked it
+
+Also broken since v1.10.44, and just as quiet: **Settings → Check for Updates
+→ Update Now**, and the **Update Now** button on the "new version available"
+dialog, did nothing at all. No error, no window, nothing to notice.
+
+Both were links to `freegstbill-update://run`, a Windows protocol that only
+the old `.bat` installer ever registered. The launcher that replaced it in
+v1.10.44 registers nothing, so the links led nowhere. They now run the update
+through the app itself — the same path the ⚙ Control Panel has been using all
+along, which was never affected — and tell you what is happening while it
+runs.
+
+The **Open GST Billing** button on the "the app needs a quick start" screen was
+dead for the same reason, and has been removed: a web page cannot start a
+program on your computer, and that screen appears precisely because the app is
+not running. The instructions underneath it are the real answer, so they are no
+longer the fallback.
+
+### Changed - three things @sangwanmail-eng asked for in #71
+
+**Customize moved up to the toolbar**, sitting just before Show Preview. It
+used to live in the Invoice Type card, which scrolls out of sight on a long
+invoice; the toolbar is sticky, so it is now reachable from anywhere - the same
+reason Show Preview moved there in v1.10.65. The options it opens are unchanged.
+
+**Qty, Rate and Cess % in Add Purchase now select their contents when you click**
+them, as the invoice screen has since v1.10.67. Typing into a field showing 0
+used to give you 018 instead of 18.
+
+**The Status column in Purchase Records is now a dropdown**, like the one on the
+Dashboard. Marking a supplier bill paid took opening it, changing a field and
+saving; it is one click now, and the supplier-payable totals follow immediately.
+
+### Fixed - installing on a PC without Node.js needed admin rights it could never ask for
+
+If you already had Node.js, the installer worked. If you did not - which is
+most people - it downloaded the official Node.js installer and ran it silently.
+That installer writes to `C:\Program Files\`, which needs administrator rights,
+and running it silently means Windows cannot even show the prompt that would
+grant them. On a normal account it quietly installed nothing, and you were then
+told *"npm install failed"*, which explains nothing.
+
+Node.js now comes as the official portable ZIP and is unpacked **inside the app
+folder**. No administrator rights, no prompt, nothing written anywhere else on
+your PC, and if you already have Node.js it is used and left alone. The
+installer also checks that it worked before carrying on, instead of failing
+later with a message about something else.
+
+Verified on this machine by installing from the real ZIP with Node.js hidden:
+three minutes, no prompts, app open in the browser at the end.
+
+### Fixed - the install downloaded 3.9 MB it had already given you
+
+Part of the setup rebuilt the OCR files from scratch and fetched the English
+language data from the internet - into a folder the installed app never reads.
+Everything it was fetching is already in the download. That step now recognises
+an installed copy and does nothing, so the install is smaller, quicker, and has
+one less thing that can fail on a slow connection.
+
+### Added - a plain-English READ ME FIRST in the download
+
+The ZIP now carries `READ ME FIRST.txt` at the top level: extract, open the
+launcher for your system, click Install - then your first invoice in five
+steps, where your data lives, how to back it up, and what to do about the
+handful of things that can go wrong. Written for a shop owner, not a developer.
+
+### Added - a Getting started checklist on the Dashboard
+
+The welcome wizard ended with a list of what to do next, then vanished forever.
+A new user landed on a dashboard that said "No invoices yet." and nothing else.
+
+There is now a short checklist on the Dashboard: business details, first
+invoice, products, bank/UPI. Each line ticks itself off from what you have
+actually saved - not from whether you have seen the screen - and each unfinished
+line has a button that takes you straight there. It removes itself once all four
+are done, and there is an X if you would rather not see it at all.
+
+### Changed - the launchers say which system they are for
+
+The ZIP used to hold three files called `Free GST Billing` with three
+extensions most people never see, because Windows hides them. They are now:
+
+```
+Free GST Billing - WINDOWS.hta
+Free GST Billing - MAC.command
+Free GST Billing - LINUX.sh
+```
+
+Nothing to work out, and nothing to click by mistake.
+
+**Already installed?** The update copies the new launcher in beside the old
+one. The first time you click **Open App** afterwards, your Desktop and
+Start-Menu shortcuts are moved over to the new launcher and the old
+`Free GST Billing.hta` is removed. Only shortcuts pointing at *this*
+install are touched, and nothing is removed while a shortcut still needs it.
+
+### Changed - the launcher explains itself
+
+It is one file, and it is the only one you need: install, open, update,
+back up, restore, move to another PC. It now says that, sizes itself to its
+own content instead of hiding buttons behind a scrollbar, and labels every
+button with what will happen rather than which script it runs. Checking for
+Node.js no longer flashes a black console window across your screen.
+
+The window itself was redrawn for someone who has never installed anything but
+an .exe: the app icon at the top, one headline, one sentence, and **one big
+button**. Update, Backup, Restore, Move and Stop are real but rare, so they sit
+behind **More options** instead of making the first screen look like a control
+panel. The folder path is shown once at the bottom, instead of being pasted
+into the middle of an error message where a long path wrapped across three
+lines and made the whole window look broken.
+
+The buttons also used to run edge to edge, touching both sides of the window,
+because they sat in a `<main>` element - the one HTML5 element Internet
+Explorer never implemented, and the launcher renders in Internet Explorer.
+
+### Added - install with one PowerShell command
+
+```powershell
+irm https://raw.githubusercontent.com/IamRamgarhia/Free-GST-Billing-Software/main/install.ps1 | iex
+```
+
+Fetches the latest release, extracts it to `%LOCALAPPDATA%\Programs\Free GST
+Billing`, installs Node.js if you do not have it, makes the shortcuts, and
+opens the app. No admin rights; nothing is written outside your own user
+folder. Set `$env:FREEGSTBILL_DIR` first to choose a different folder. If the
+app is already installed there with data in it, the command stops and points
+you at **Control Panel → Update Now** rather than writing over your books.
+
+### Fixed - the README, the user guide and the in-app Help were describing an installer that no longer exists
+
+Both told you to double-click `Install FreeGSTBill.bat`, and to stop and update
+the app with `Stop FreeGSTBill.bat` and `Update FreeGSTBill.bat`. Those files
+stopped shipping in v1.10.44, when the ZIP became one launcher plus a hidden
+`_system` folder. The user guide also sent you to the green *Code → Download
+ZIP* button, which gives the source code without the built app. Both documents
+now describe what is actually in the ZIP, and point at `_system\data\` as the
+folder to back up.
+
+The seven leftover files from that installer — `Install FreeGSTBill.bat`,
+`Start`, `Stop`, `Update`, `start-freegstbill.bat`, `start-server-silent.bat`
+and `START HERE.txt` — are gone from the repository too. They had not shipped
+in a download since v1.10.44, but they were still the first thing anyone saw
+on the GitHub page.
+
+The same stale steps were inside the app, on the **Help → User Guide** screen,
+and they are corrected there too. The README's "Recently Delivered" list had
+stopped at v1.10.42 and now covers everything through this release.
+
+---
+
+## [1.10.68] - 2026-09-23
+
+**Type a client's GSTIN and their State fills in by itself — and a mistyped
+GSTIN is caught on the spot. No internet, no account, no API key.**
+
+### How to update
+
+**Current version:** 1.10.67  →  **New version:** 1.10.68
+
+#### If the in-app Update button works for you
+1. Open the Free GST Billing launcher.
+2. Click **Update**.
+3. Wait for "Update complete", then click **Stop Server**, then **Open App**.
+
+That is all — your data is not touched.
+
+#### If the Update button does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.68.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app completely (click **Stop Server** first if it is running).
+3. Extract the ZIP over your existing Free GST Billing folder, replacing
+   files when asked.
+4. Double-click the launcher again.
+
+#### Linux / NAS
+The in-app **Control Panel → Update Now** works here too. It needs `unzip`
+(or python3). Restart the app, or its container, afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` (on Linux `~/Documents/FreeGSTBill Backups/`)
+before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Added - a GSTIN fills in the state, and catches its own typos
+
+Idea from [@deppen12](https://github.com/deppen12) in PR #68, built here
+without the parts that would have exposed your books to the network.
+
+A GSTIN is not an opaque string. `27AAPFU0939F1ZV` says, on its own:
+
+```
+27 AAPFU0939F 1 Z V
+|  |          | | +- a checksum over the first 14 characters
+|  |          | +--- Z for a regular taxpayer (D = TDS, C = TCS)
+|  |          +----- which registration of that PAN in that state
+|  +---------------- the PAN; its 4th letter is the kind of entity
++------------------- the state (here 27, Maharashtra)
+```
+
+So on the **Clients** screen and on the invoice's **Billed To** panel, typing
+a GSTIN now:
+
+- fills in the **State** if you left it blank, and
+- says so if the GSTIN you typed says a different state than the one you
+  picked, and
+- refuses a GSTIN that fails its own checksum — a single mistyped or
+  swapped character is caught here, instead of when GSTR-1 is rejected.
+
+The state drives place of supply, so a wrong one quietly charges CGST + SGST
+where IGST is owed, on every invoice to that client.
+
+This runs entirely offline. **City is not filled in** — a GSTIN does not
+contain one, and guessing it from the PIN block would have been a guess.
+
+---
+
+## [1.10.67] - 2026-09-23
+
+**Thirteen things @sangwanmail-eng asked for in #66: totals that count only
+real sales, an invoice you cancel instead of delete, a light sidebar in Light
+Mode, and a stamp of your own.**
+
+### How to update
+
+**Current version:** 1.10.66  →  **New version:** 1.10.67
+
+#### If the in-app Update button works for you
+1. Open the Free GST Billing launcher.
+2. Click **Update**.
+3. Wait for "Update complete", then click **Stop Server**, then **Open App**.
+
+That is all — your data is not touched.
+
+#### If the Update button does not work (or you are unsure)
+1. Download `Free-GST-Billing-v1.10.67.zip` from the
+   [Releases page](https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases/latest).
+2. Close the app completely (click **Stop Server** first if it is running).
+3. Extract the ZIP over your existing Free GST Billing folder, replacing
+   files when asked.
+4. Double-click the launcher again.
+
+#### Linux / NAS
+From v1.10.66 the in-app **Control Panel → Update Now** works here too. It
+needs `unzip` (or python3). Restart the app, or its container, afterwards.
+
+#### Is my data safe?
+Yes. Invoices, clients, products and settings live in `_system/data/`, which
+an update never touches. The updater also takes an automatic backup to
+`Documents\FreeGSTBill Backups\` (on Linux `~/Documents/FreeGSTBill Backups/`)
+before it changes anything.
+
+#### Something went wrong?
+Open an issue with a screenshot of the error:
+https://github.com/IamRamgarhia/Free-GST-Billing-Software/issues
+
+### Fixed - adding a new company could replace the one you had
+
+Reported as: *"when adding a new company, the newly added company profile
+replaces the existing company profile"*, together with a stray unsaved-changes
+warning.
+
+**Add New Profile** only blanked the form. Saving then wrote the new company
+over the old one - and on a first install the old company had never been kept
+in **Business Profiles**, so it was gone for good. The company on screen is now
+saved into Business Profiles first, and the blank form no longer claims you
+have unsaved work.
+
+### Fixed - Total Invoiced counted quotes and challans as sales
+
+The dashboard cards added up **every** document: Proforma / Estimate, Delivery
+Challan, Credit Note, Bill of Supply and Composition alike. An estimate you may
+never be paid for was counted as turnover.
+
+**Total Invoiced**, **Tax Collected**, **Outstanding** and **Invoices** now
+count Tax Invoice, Bill of Supply and Composition, subtract Credit Notes, and
+ignore Proforma / Estimate and Delivery Challan entirely.
+
+### Added - Cancel Invoice, in place of deleting one
+
+An issued invoice number has to stay in the books, so a saved invoice is no
+longer deleted from the list. **Cancel invoice** keeps the document and its
+number, stamps **CANCELLED** across the PDF, and takes it out of the dashboard
+totals, Reports, GST Returns, Income Tax, payment reminders and the receipt
+screen. Stock from the invoice is put back. Picking any other status from the
+status dropdown un-cancels it. The same applies to the bulk action, which now
+reads **Cancel invoices**.
+
+### Changed - the invoice type is fixed once an invoice is saved
+
+The type sets the number series and the tax treatment, so changing it after the
+customer has the document would put your books and their copy out of step. On a
+saved invoice the type buttons are locked; **Duplicate** still lets you raise a
+different document from the same details.
+
+### Changed - the sidebar follows Light Mode
+
+It was always dark navy, so Light Mode left the app half light and half dark.
+Dark Mode is unchanged.
+
+### Added - a stamp of your own, and a size slider for the signature
+
+**Settings → Branding** now has a **Company Stamp / Seal** upload beside the
+signature, each with the size slider the logo already had. Both print centred
+above the signatory name, side by side.
+
+### Changed - smaller things from the same list
+
+- **Billing From (Business Profile)** is gone from the invoice screen. The
+  company picker in the sidebar already decides which business an invoice
+  belongs to, and two pickers made it possible to bill from the wrong one.
+- New installs start on **India**, instead of guessing from the computer's
+  language and starting an Indian shop on "Outside India" with a US company.
+- New products default to **Pcs**.
+- Tapping **Qty**, **Rate** or **Discount** selects what is in the box, so
+  typing replaces it instead of landing next to the 0.
+- The whole-bill discount box is wide enough for its own label - it read
+  **"₹ (fixe"**.
+- **Type**, **Paid** and **Status** are centred in the invoice list. Amounts
+  stay right-aligned and names left-aligned, so the columns still line up.
+- **Settings** keeps one **Save Profile** button pinned at the top; the other
+  sections still save the moment you change them.
+
+### Already worked, for the record
+
+**Convert to Tax Invoice** already creates a new invoice and leaves the
+estimate alone. Deleted invoices already went to a 30-day Trash rather than
+disappearing.
+
+---
+
 ## [1.10.66] - 2026-09-14
 
 **Every company now has fully separate figures, invoices print the tax they

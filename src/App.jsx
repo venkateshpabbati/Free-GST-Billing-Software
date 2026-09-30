@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
 import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator, HardDrive, Menu } from 'lucide-react';
-import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
-import { isModuleEnabled, getUpcomingFilings } from './utils';
+import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients, runUpdateNow } from './store';
+import { isModuleEnabled, getUpcomingFilings, isCancelledBill } from './utils';
 // v1.10.4 — Route-level lazy loading. Prior App.jsx synchronously
 // imported all 12 views (~15k LOC combined), so a first-paint on
 // Dashboard downloaded and parsed GSTReturns (1952), InvoiceGenerator
@@ -19,7 +19,7 @@ import { isModuleEnabled, getUpcomingFilings } from './utils';
 import Dashboard from './components/Dashboard';
 import InvoiceGenerator from './components/InvoiceGenerator';
 import SetupWizard from './components/SetupWizard';
-import ToastContainer from './components/Toast';
+import ToastContainer, { toast } from './components/Toast';
 import ConfirmModalContainer from './components/ConfirmModal';
 import WelcomeGuide from './components/WelcomeGuide';
 const SettingsView = lazy(() => import('./components/SettingsView'));
@@ -65,7 +65,8 @@ function App() {
     try {
       const params = new URLSearchParams(window.location.search);
       const v = params.get('view');
-      const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'guide', 'settings'];
+      // v1.10.74 - 'controlpanel' added so ?view=controlpanel deep links work too.
+      const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'guide', 'settings', 'controlpanel'];
       if (v && valid.includes(v)) {
         // Strip the query string so a refresh doesn't keep snapping back to
         // the shortcut target — only the *first* navigation honours it.
@@ -195,13 +196,14 @@ function App() {
         const today = new Date().toISOString().split('T')[0];
         const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 3);
         const tomorrowStr = tomorrow.toISOString().split('T')[0];
+        // v1.10.67 (#66 item 12) — never chase payment for a cancelled invoice.
         const overdue = bills.filter(b => {
           const d = b.data?.details?.dueDate;
-          return d && d < today && b.status !== 'paid';
+          return d && d < today && b.status !== 'paid' && !isCancelledBill(b);
         });
         const dueSoon = bills.filter(b => {
           const d = b.data?.details?.dueDate;
-          return d && d >= today && d <= tomorrowStr && b.status !== 'paid';
+          return d && d >= today && d <= tomorrowStr && b.status !== 'paid' && !isCancelledBill(b);
         });
         // Honour the user's stock-alert preferences. When disabled, the filter
         // returns nothing — bell badge drops to 0 for the stock category.
@@ -262,6 +264,21 @@ function App() {
   // throw "Cannot access 'X' before initialization" at render time because
   // useMemo's dependency array is evaluated synchronously every render.
 
+  // v1.10.69 - see runUpdateNow() in store.js for why this is no longer a link.
+  const [updating, setUpdating] = useState(false);
+  const handleUpdateNow = async () => {
+    setUpdating(true);
+    toast('Updating… your data is backed up first. This takes about a minute.', 'info', 8000);
+    const result = await runUpdateNow();
+    setUpdating(false);
+    if (result.ok) {
+      setShowUpdateModal(false);
+      toast('Update finished. Reload the page to use the new version.', 'success', 10000);
+    } else {
+      toast(`Update failed — ${result.error}`, 'error', 10000);
+    }
+  };
+
   const dismissUpdate = () => {
     if (updateInfo?.latest) {
       localStorage.setItem('freegstbill_dismissedUpdate', updateInfo.latest);
@@ -276,12 +293,19 @@ function App() {
   // Check if server is running — continuously monitors
   useEffect(() => {
     let cancelled = false;
+    // v1.10.73 - a busy or older PC can take a few seconds to answer. One
+    // slow reply used to replace the whole app with "Needs a Quick Start"
+    // mid-invoice. Once the app has loaded, it now takes 3 missed checks in a
+    // row (about 15 s) before saying the app is not running; before the first
+    // load it still says so straight away.
+    let misses = 0;
 
     const checkServer = async () => {
       try {
-        const res = await fetch('/api/profile', { signal: AbortSignal.timeout(3000) });
+        const res = await fetch('/api/profile', { signal: AbortSignal.timeout(8000) });
         if (res.ok) {
           if (cancelled) return;
+          misses = 0;
           setServerDown(false);
           setServerStatus('online');
           if (!profileLoaded.current) {
@@ -296,7 +320,9 @@ function App() {
         }
         throw new Error('not ok');
       } catch {
-        if (!cancelled) {
+        if (cancelled) return;
+        misses += 1;
+        if (!profileLoaded.current || misses >= 3) {
           setServerDown(true);
           setServerStatus('offline');
         }
@@ -488,6 +514,8 @@ function App() {
       acts.push({ label: `Go to ${item.label}`, hint: '', category: 'nav', run: item.onClick || (() => setCurrentView(item.id)) });
     });
     acts.push({ label: 'Go to Settings', hint: '', category: 'nav', run: () => setCurrentView('settings') });
+    // v1.10.74 - Control Panel has its own sidebar button but was missing here.
+    acts.push({ label: 'Go to Control Panel', hint: '', category: 'nav', run: () => setCurrentView('controlpanel') });
     acts.push({ label: 'Toggle dark mode', hint: '', category: 'action', run: () => setDarkMode(d => !d) });
     acts.push({ label: 'Show keyboard shortcuts', hint: 'Ctrl+/', category: 'help', run: () => setShowShortcutsHelp(true) });
     if (updateInfo?.updateAvailable) {
@@ -525,14 +553,31 @@ function App() {
       });
     });
     // Settings sections (jump to specific area)
+    // v1.10.74 - these all used to just open Settings at the top. Each now
+    // names its section id; after Settings mounts (it's lazy-loaded, so retry
+    // briefly) we click that section's "Jump to" chip, which already scrolls
+    // below the sticky bars.
+    const openSettingsAt = (sectionId) => {
+      setCurrentView('settings');
+      let tries = 0;
+      const jump = () => {
+        const chip = document.querySelector(`.settings-jumpnav a[href="#${sectionId}"]`);
+        if (chip && document.getElementById(sectionId)) chip.click();
+        else if (++tries < 30) setTimeout(jump, 100);
+      };
+      setTimeout(jump, 50);
+    };
     const settingsJumps = [
-      'Company profile', 'Payment accounts', 'Print & PDF Settings', 'PDF Style Editor',
-      'Business type presets', 'Section labels', 'Watermarks', 'Multi-copy print',
-      'Digital signature', 'Company letterhead', 'Modules', 'Region preference',
-      'Google Drive backup', 'App updates',
+      ['Company profile', 'section-company'], ['Payment accounts', 'section-company'],
+      ['Print & PDF Settings', 'section-print'], ['PDF Style Editor', 'section-print'],
+      ['Business type presets', 'section-print'], ['Section labels', 'section-print'],
+      ['Watermarks', 'section-print'], ['Multi-copy print', 'section-print'],
+      ['Digital signature', 'section-company'], ['Company letterhead', 'section-print'],
+      ['Modules', 'section-modules'], ['Region preference', 'section-region'],
+      ['Google Drive backup', 'section-cloud'], ['App updates', 'section-updates'],
     ];
-    settingsJumps.forEach(s => {
-      acts.push({ label: `⚙️ Settings → ${s}`, hint: '', category: 'settings', run: () => setCurrentView('settings') });
+    settingsJumps.forEach(([s, sectionId]) => {
+      acts.push({ label: `⚙️ Settings → ${s}`, hint: '', category: 'settings', run: () => openSettingsAt(sectionId) });
     });
     return acts;
   }, [navItems, updateInfo, handleNewInvoice, searchCorpus]);
@@ -644,14 +689,19 @@ function App() {
             Your data is <strong>100% safe</strong> on your computer — nothing is lost.
             The app just needs to be started once.
           </p>
-          <a href="freegstbill://start" className="server-start-btn">
-            Open GST Billing
-          </a>
+          {/* v1.10.69 - there was an "Open GST Billing" button here, linking to
+              freegstbill://start. Only the old Install FreeGSTBill.bat ever
+              registered that protocol, and it stopped shipping in v1.10.44, so
+              on every current install the button did nothing at all. There is
+              also nothing it could do: a web page cannot start a program, and
+              this screen is being served from the offline cache precisely
+              because the server is not running. The steps below are the only
+              real answer, so they are no longer the fallback. See ERR-019. */}
           <div className="server-down-steps">
-            <p className="server-down-hint">Or start manually:</p>
+            <p className="server-down-hint">How to start it:</p>
             <ol>
-              <li>Double-click <strong>Free GST Billing Software</strong> on your Desktop</li>
-              <li>Or search <strong>"Free GST Billing"</strong> in Start Menu</li>
+              <li>Double-click <strong>Free GST Billing</strong> on your Desktop, then click <strong>Open App</strong></li>
+              <li>Or search <strong>"Free GST Billing"</strong> in the Start Menu</li>
             </ol>
           </div>
           <p className="server-down-safe">All your invoices, clients, and data are safely stored on your computer. They are never deleted or shared.</p>
@@ -878,7 +928,7 @@ function App() {
       )}
       <div className="main-content">
         {currentView === 'dashboard' && (
-          <Dashboard onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} onConvert={handleConvertToInvoice} onOpenProducts={() => setCurrentView('inventory')} activeProfile={profile} />
+          <Dashboard onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} onConvert={handleConvertToInvoice} onOpenProducts={() => setCurrentView('inventory')} onOpenSettings={() => setCurrentView('settings')} onOpenGuide={() => setCurrentView('guide')} activeProfile={profile} />
         )}
         {currentView === 'new' && (
           <InvoiceGenerator
@@ -1150,12 +1200,12 @@ function App() {
                   View on GitHub
                 </a>
               )}
-              <a href="freegstbill-update://run" className="btn btn-primary" style={{ textDecoration: 'none' }}>
-                <Download size={16} /> Update Now
-              </a>
+              <button type="button" className="btn btn-primary" disabled={updating} onClick={handleUpdateNow}>
+                <Download size={16} /> {updating ? 'Updating…' : 'Update Now'}
+              </button>
             </div>
             <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.6rem', marginBottom: 0 }}>
-              <em>Update Now</em> launches <code>Update FreeGSTBill.bat</code> in a window. Wait for it to finish (~30 seconds), then refresh this page.
+              <em>Update Now</em> backs up your data, then fetches the newest release. It takes about a minute — leave this window open, then reload the page when it finishes.
             </p>
           </div>
         </div>

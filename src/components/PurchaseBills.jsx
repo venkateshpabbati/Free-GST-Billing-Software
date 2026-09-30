@@ -30,13 +30,28 @@ const BillOCR = lazy(() => import('./BillOCR'));
 
 const PAYMENT_STATUSES = ['Unpaid', 'Paid', 'Partial'];
 
+// v1.10.69 (#71 item 3) - the same three colours the pill used, now shared
+// with the dropdown in the records table.
+const PAYMENT_STATUS_COLORS = {
+  Unpaid:  { bg: 'rgba(245, 158, 11, 0.14)', color: '#f59e0b' },
+  Paid:    { bg: 'rgba(5, 150, 105, 0.14)',  color: '#059669' },
+  Partial: { bg: 'rgba(139, 92, 246, 0.14)', color: '#8b5cf6' },
+};
+
 // cessPercent added in v1.6.8 (P1 #16) — suppliers of tobacco / aerated
 // drinks / motor vehicles / coal charge GST + Cess. Without a slot for it,
 // we couldn't reclaim ITC on the cess in GSTR-3B Table 4(A).
 const emptyItem = { name: '', hsn: '', quantity: 1, rate: 0, taxPercent: 18, cessPercent: 0 };
 
+// v1.10.74 - today's LOCAL date (toISOString is UTC, so before 05:30 IST it
+// gave yesterday). Called when the form opens, not once at load.
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const emptyForm = {
-  date: new Date().toISOString().split('T')[0],
+  date: '', // v1.10.74 - set to localToday() when the form opens
   supplierName: '',
   // v1.10.29 — supplier address for the PDF header. Optional; blank
   // pre-v1.10.29 records fall through gracefully.
@@ -122,13 +137,17 @@ export default function PurchaseBills() {
     } else {
       items = [{ ...emptyItem }];
     }
+    // v1.10.74 - IGST on the bill and no CGST means the supplier is in
+    // another state, so open the form with Inter-state ticked.
+    const tb = extracted.taxBreakdown || {};
     setForm({
       ...emptyForm,
-      date: extracted.date || emptyForm.date,
+      date: extracted.date || localToday(),
       supplierName: extracted.supplierName || '',
       supplierGstin: extracted.supplierGstin || '',
       invoiceNumber: extracted.invoiceNumber || '',
       items,
+      interstate: Number(tb.igst) > 0 && !Number(tb.cgst),
     });
     setShowForm(true);
     const msg = Array.isArray(extracted.items) && extracted.items.length > 0
@@ -212,7 +231,7 @@ export default function PurchaseBills() {
   }, { taxable: 0, tax: 0, total: 0 });
 
   const openAdd = () => {
-    setForm({ ...emptyForm, items: [{ ...emptyItem }] });
+    setForm({ ...emptyForm, date: localToday(), items: [{ ...emptyItem }] });
     setEditingId(null);
     setShowForm(true);
   };
@@ -326,7 +345,13 @@ export default function PurchaseBills() {
       doc.line(marginL + 100, y, marginR, y); y += 6;
       doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(80);
       doc.text('Taxable', marginL + 100, y); doc.text(fmt(t.taxable), marginR, y, { align: 'right' }); y += 5;
-      doc.text('Tax (CGST+SGST or IGST)', marginL + 100, y); doc.text(fmt(t.tax), marginR, y, { align: 'right' }); y += 5;
+      // v1.10.74 - show the tax split instead of one combined line.
+      if (purchase.interstate) {
+        doc.text('IGST', marginL + 100, y); doc.text(fmt(t.tax), marginR, y, { align: 'right' }); y += 5;
+      } else {
+        doc.text('CGST', marginL + 100, y); doc.text(fmt(t.tax / 2), marginR, y, { align: 'right' }); y += 5;
+        doc.text('SGST', marginL + 100, y); doc.text(fmt(t.tax / 2), marginR, y, { align: 'right' }); y += 5;
+      }
       if (t.cess > 0.005) { doc.text('Cess', marginL + 100, y); doc.text(fmt(t.cess), marginR, y, { align: 'right' }); y += 5; }
       if (Math.abs(t.roundOff) > 0.005) { doc.text('Round-off', marginL + 100, y); doc.text((t.roundOff > 0 ? '+' : '') + fmt(t.roundOff), marginR, y, { align: 'right' }); y += 5; }
       y += 2; doc.setDrawColor(0); doc.setLineWidth(0.5); doc.line(marginL + 100, y, marginR, y); y += 6;
@@ -435,6 +460,7 @@ export default function PurchaseBills() {
         // Batch stock adjustments per product so we don't race on parallel saves.
         const stockDeltaById = new Map();
         const productsToUpsert = new Map();
+        const seenPriorKeys = new Set();
 
         for (const it of purchase.items.filter(x => x.name)) {
           const qty = Number(it.quantity) || 0;
@@ -450,6 +476,7 @@ export default function PurchaseBills() {
               ? it.productId
               : `name:${(it.name || '').trim().toLowerCase()}`;
             const priorQty = priorQtyByKey.get(priorKey) || 0;
+            seenPriorKeys.add(priorKey);
             const delta = qty - priorQty; // may be negative (line reduced) or zero (unchanged)
             stockDeltaById.set(existing.id, (stockDeltaById.get(existing.id) || 0) + delta);
             productsToUpsert.set(existing.id, {
@@ -478,6 +505,16 @@ export default function PurchaseBills() {
           }
         }
 
+        // Rows removed while editing: their stock was added when the bill was
+        // first saved, so take it back out (it used to stay in stock forever).
+        for (const [key, priorQty] of priorQtyByKey) {
+          if (seenPriorKeys.has(key)) continue;
+          const gone = key.startsWith('name:') ? byName.get(key.slice(5)) : byId.get(key);
+          if (!gone) continue;
+          stockDeltaById.set(gone.id, (stockDeltaById.get(gone.id) || 0) - priorQty);
+          if (!productsToUpsert.has(gone.id)) productsToUpsert.set(gone.id, { ...gone, _placeholderId: gone.id });
+        }
+
         // Apply deltas + write.
         const upserts = [];
         for (const [key, prod] of productsToUpsert) {
@@ -491,11 +528,12 @@ export default function PurchaseBills() {
           }
         }
         await Promise.all(upserts);
+        toast(editingId ? 'Purchase updated' : 'Purchase added — items synced to Products', 'success');
       } catch (e) {
         console.warn('Products auto-sync from purchase failed (non-fatal):', e);
+        toast('Purchase saved, but updating stock in Products failed - check them there', 'warning');
       }
 
-      toast(editingId ? 'Purchase updated' : 'Purchase added — items synced to Products', 'success');
       closeForm();
       loadPurchases();
       // v1.10.54 — saving a bill upserts its items into the product master
@@ -508,6 +546,39 @@ export default function PurchaseBills() {
     }
   };
 
+  // v1.10.69 (#71 item 3) - change the payment status straight from the list.
+  // Saves the whole record back, so nothing else about the bill is disturbed;
+  // the list is reloaded afterwards so the supplier-payable totals follow.
+  const changePaymentStatus = async (purchase, paymentStatus) => {
+    if ((purchase.paymentStatus || 'Unpaid') === paymentStatus) return;
+    try {
+      await savePurchase({ ...purchase, paymentStatus });
+      toast(`Marked ${paymentStatus.toLowerCase()}`, 'success');
+      loadPurchases();
+    } catch {
+      toast('Could not change the status', 'error');
+    }
+  };
+
+  // Take a deleted bill's quantities back out of product stock (never below 0).
+  // Matches products the same way saving does: productId, then name.
+  const revertPurchaseStock = async (bill) => {
+    const lines = (bill?.items || []).filter(it => it.name && Number(it.quantity) > 0);
+    if (!lines.length) return;
+    const products = await getAllProducts();
+    const byName = new Map(products.map(p => [(p.name || '').trim().toLowerCase(), p]));
+    const byId = new Map(products.map(p => [p.id, p]));
+    const minus = new Map();
+    for (const it of lines) {
+      const prod = (it.productId && byId.get(it.productId)) || byName.get(it.name.trim().toLowerCase());
+      if (prod) minus.set(prod.id, (minus.get(prod.id) || 0) + Number(it.quantity));
+    }
+    await Promise.all([...minus].map(([pid, qty]) => {
+      const prod = byId.get(pid);
+      return saveProduct({ ...prod, stock: Math.max(0, (Number(prod.stock) || 0) - qty) });
+    }));
+  };
+
   const handleDelete = async (id) => {
     if (await confirmAction({
       title: 'Delete this purchase bill?',
@@ -516,8 +587,13 @@ export default function PurchaseBills() {
       tone: 'danger',
     })) {
       try {
+        const bill = purchases.find(p => p.id === id);
         await deletePurchase(id);
-        toast('Purchase deleted', 'success');
+        // The confirm above promises this: the bill's quantities were added to
+        // stock when it was saved, so deleting it takes them back out.
+        let stockOk = true;
+        try { await revertPurchaseStock(bill); } catch (e) { stockOk = false; console.warn('Stock revert failed', e); }
+        toast(stockOk ? 'Purchase deleted' : 'Purchase deleted, but its stock could not be taken out of Products', stockOk ? 'success' : 'warning');
         loadPurchases();
       } catch {
         toast('Failed to delete', 'error');
@@ -721,13 +797,14 @@ export default function PurchaseBills() {
 
   const exportCSV = () => {
     if (filtered.length === 0) { toast('No purchases to export', 'warning'); return; }
-    const headers = ['Date', 'Supplier', 'GSTIN', 'Invoice No', 'Taxable Amount', 'Tax', 'Round-off', 'Total', 'Status', 'Note'];
+    // v1.10.74 - Cess and Inter-state columns; Tax never included cess.
+    const headers = ['Date', 'Supplier', 'GSTIN', 'Invoice No', 'Taxable Amount', 'Tax (excl. cess)', 'Cess', 'Inter-state', 'Round-off', 'Total', 'Status', 'Note'];
     // v1.10.66 (#63) — toCsvLine neutralises formula-like text and quotes
     // line breaks, which the old local escape let split a row in two.
     const lines = [toCsvLine(headers)];
     filtered.forEach(p => {
       const t = calcPurchaseTotal(p.items, !!p.applyRoundOff);
-      lines.push(toCsvLine([p.date, p.supplierName, p.supplierGstin, p.invoiceNumber, t.taxable.toFixed(2), t.tax.toFixed(2), t.roundOff.toFixed(2), t.finalTotal.toFixed(2), p.paymentStatus, p.note]));
+      lines.push(toCsvLine([p.date, p.supplierName, p.supplierGstin, p.invoiceNumber, t.taxable.toFixed(2), t.tax.toFixed(2), t.cess.toFixed(2), p.interstate ? 'Y' : 'N', t.roundOff.toFixed(2), t.finalTotal.toFixed(2), p.paymentStatus, p.note]));
     });
     const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -747,10 +824,10 @@ export default function PurchaseBills() {
             <h1 className="page-title">Purchase Bills</h1>
             <p className="page-subtitle">Track supplier invoices for ITC claims in GSTR-3B</p>
           </div>
-          <HelpButton title="Purchase Bills — how to use">
+          <HelpButton title="Purchase Bills — how to use" doc="purchases">
             <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
               <li><strong>Add Purchase</strong> — record every supplier tax invoice you receive. The GST paid becomes your ITC (input tax credit) in GSTR-3B.</li>
-              <li><strong>Import from image (OCR)</strong> — snap the supplier's invoice with your phone. The app extracts supplier GSTIN, invoice number, date, and grand total. Line items still need manual entry (bill layouts vary too much for reliable auto-parsing).</li>
+              <li><strong>Import from image (OCR)</strong> — snap the supplier's invoice with your phone. The app reads the supplier, GSTIN, invoice number, date, total and the item lines it can find, all on your computer. Check every field before saving.</li>
               <li><strong>Interstate toggle</strong> — flip ON when the supplier is in a different state (they charged IGST) so ITC routes correctly.</li>
               <li><strong>Payment status</strong> — Unpaid / Partial / Paid drives the "amount payable to suppliers" report.</li>
               <li><strong>Export CSV</strong> — hand to your CA at return time.</li>
@@ -831,8 +908,15 @@ export default function PurchaseBills() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.35rem 1rem', fontSize: '0.9rem', maxWidth: 320, marginLeft: 'auto' }}>
                 <span style={{ color: 'var(--text-muted)' }}>Taxable</span>
                 <span style={{ textAlign: 'right' }}>{formatCurrency(t.taxable)}</span>
-                <span style={{ color: 'var(--text-muted)' }}>Tax</span>
-                <span style={{ textAlign: 'right' }}>{formatCurrency(t.tax)}</span>
+                {/* v1.10.74 - tax split: IGST, or CGST + SGST half each. */}
+                {p.interstate ? (
+                  <><span style={{ color: 'var(--text-muted)' }}>IGST</span><span style={{ textAlign: 'right' }}>{formatCurrency(t.tax)}</span></>
+                ) : (
+                  <>
+                    <span style={{ color: 'var(--text-muted)' }}>CGST</span><span style={{ textAlign: 'right' }}>{formatCurrency(t.tax / 2)}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>SGST</span><span style={{ textAlign: 'right' }}>{formatCurrency(t.tax / 2)}</span>
+                  </>
+                )}
                 {t.cess > 0.005 && <><span style={{ color: 'var(--text-muted)' }}>Cess</span><span style={{ textAlign: 'right' }}>{formatCurrency(t.cess)}</span></>}
                 {Math.abs(t.roundOff) > 0.005 && <><span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Round-off</span><span style={{ textAlign: 'right', fontStyle: 'italic' }}>{(t.roundOff > 0 ? '+' : '') + formatCurrency(t.roundOff)}</span></>}
                 <span style={{ borderTop: '2px solid var(--text)', paddingTop: 6, fontWeight: 700 }}>TOTAL</span>
@@ -886,6 +970,8 @@ export default function PurchaseBills() {
               onChange={e => setSearch(e.target.value)} className="search-input" />
           </div>
           <select className="filter-select" value={fyFilter} onChange={e => setFyFilter(e.target.value)}>
+            {/* v1.10.74 - '' already means no FY filter below. */}
+            <option value="">All years</option>
             {fyOptions.map(fy => <option key={fy.value} value={fy.value}>{fy.label}</option>)}
           </select>
           {search && (
@@ -999,12 +1085,18 @@ export default function PurchaseBills() {
                 <div className="form-group" style={{ flex: 0.7, margin: 0 }}>
                   {idx === 0 && <label className="form-label">Qty</label>}
                   {/* v1.6.8 (P2 #30): decimal quantity for 2.5 kg / 0.5 hr / etc. */}
+                  {/* v1.10.69 - requested (#71 item 2, @sangwanmail-eng): the
+                      number fields here now select their contents on focus, as
+                      the invoice screen has since v1.10.67. Without it, typing
+                      into a field showing 0 gave you 018 rather than 18. */}
                   <input type="number" className="form-input" value={item.quantity} min="0" step="any"
+                    onFocus={e => e.target.select()}
                     onChange={e => updateItem(idx, 'quantity', e.target.value)} />
                 </div>
                 <div className="form-group" style={{ flex: 1, margin: 0 }}>
                   {idx === 0 && <label className="form-label">Rate</label>}
                   <input type="number" className="form-input" value={item.rate} min="0" step="any"
+                    onFocus={e => e.target.select()}
                     onChange={e => updateItem(idx, 'rate', e.target.value)} />
                 </div>
                 <div className="form-group" style={{ flex: 0.75, margin: 0 }}>
@@ -1012,7 +1104,7 @@ export default function PurchaseBills() {
                   {/* v1.6.8 (P2 #29): "Other…" for jeweller 3% / diamond 0.25% /
                        agriculture 0.1% and any bespoke rate. */}
                   <select className="form-input" value={
-                    ['0','0.1','0.25','3','5','12','18','28'].includes(String(item.taxPercent)) ? String(item.taxPercent) : '__custom__'
+                    ['0','0.1','0.25','3','5','12','18','28','40'].includes(String(item.taxPercent)) ? String(item.taxPercent) : '__custom__'
                   } onChange={async e => {
                     if (e.target.value === '__custom__') {
                       const v = await promptAction({
@@ -1037,12 +1129,14 @@ export default function PurchaseBills() {
                     <option value="12">12%</option>
                     <option value="18">18%</option>
                     <option value="28">28%</option>
-                    <option value="__custom__">Other…{['0','0.1','0.25','3','5','12','18','28'].includes(String(item.taxPercent)) ? '' : ` (${item.taxPercent}%)`}</option>
+                    <option value="40">40%</option>
+                    <option value="__custom__">Other…{['0','0.1','0.25','3','5','12','18','28','40'].includes(String(item.taxPercent)) ? '' : ` (${item.taxPercent}%)`}</option>
                   </select>
                 </div>
                 <div className="form-group" style={{ flex: 0.7, margin: 0 }}>
                   {idx === 0 && <label className="form-label" title="Compensation Cess — for tobacco, aerated, motor vehicles, coal, etc.">Cess %</label>}
                   <input type="number" className="form-input" value={item.cessPercent ?? 0} min="0" step="any"
+                    onFocus={e => e.target.select()}
                     onChange={e => updateItem(idx, 'cessPercent', e.target.value)} />
                 </div>
                 <div style={{ flex: '0 0 auto', marginBottom: idx === 0 ? 0 : 0 }}>
@@ -1062,7 +1156,8 @@ export default function PurchaseBills() {
                 {formTotals.cess > 0 && (
                   <span>Cess: <strong>{formatCurrency(formTotals.cess)}</strong></span>
                 )}
-                {form.applyRoundOff && (
+                {/* v1.10.74 - hide when there is nothing to round, like View/PDF. */}
+                {form.applyRoundOff && Math.abs(formTotals.roundOff) > 0.005 && (
                   <span style={{ color: '#475569' }}>
                     Round-off: <strong>{(formTotals.roundOff >= 0 ? '+' : '') + formatCurrency(formTotals.roundOff)}</strong>
                   </span>
@@ -1126,12 +1221,18 @@ export default function PurchaseBills() {
                       <td style={{ textAlign: 'right' }}>{formatCurrency(t.taxable)}</td>
                       <td style={{ textAlign: 'right' }} className="text-muted">{formatCurrency(t.tax)}</td>
                       <td style={{ textAlign: 'right' }} className="font-bold">{formatCurrency(t.finalTotal)}</td>
+                      {/* v1.10.69 - requested (#71 item 3, @sangwanmail-eng):
+                          "the Status column should have a drop-down option,
+                          similar to the Status drop-down available on the
+                          Dashboard." Marking a supplier bill paid took
+                          opening it, changing one field and saving. */}
                       <td>
-                        <span style={{
-                          padding: '0.15rem 0.5rem', borderRadius: 4, fontSize: '0.75rem', fontWeight: 600,
-                          background: p.paymentStatus === 'Paid' ? '#ecfdf5' : p.paymentStatus === 'Partial' ? '#f5f3ff' : '#fffbeb',
-                          color: p.paymentStatus === 'Paid' ? '#059669' : p.paymentStatus === 'Partial' ? '#8b5cf6' : '#f59e0b',
-                        }}>{p.paymentStatus || 'Unpaid'}</span>
+                        <select className="status-select"
+                          value={p.paymentStatus || 'Unpaid'}
+                          style={{ background: PAYMENT_STATUS_COLORS[p.paymentStatus || 'Unpaid'].bg, color: PAYMENT_STATUS_COLORS[p.paymentStatus || 'Unpaid'].color, borderColor: PAYMENT_STATUS_COLORS[p.paymentStatus || 'Unpaid'].color + '44' }}
+                          onChange={e => changePaymentStatus(p, e.target.value)}>
+                          {PAYMENT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
                       </td>
                       <td>
                         <div className="table-actions">

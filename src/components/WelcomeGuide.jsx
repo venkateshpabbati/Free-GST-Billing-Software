@@ -8,18 +8,23 @@ const STEPS = [
   { id: 'welcome', title: 'Welcome', icon: FileText },
   { id: 'business', title: 'Business Details', icon: Building2 },
   { id: 'bank', title: 'Bank & UPI', icon: Shield },
-  { id: 'ready', title: 'You\'re Ready!', icon: BarChart3 },
+  { id: 'ready', title: 'You\'re All Set!', icon: BarChart3 },
 ];
 
 export default function WelcomeGuide({ onComplete }) {
   const [step, setStep] = useState(0);
-  const detectedCountry = detectCountryFromBrowser();
+  // v1.10.74 - region starts as India (below), so the country must too; the
+  // browser country is only used when "Outside India" is picked.
   const [profile, setProfile] = useState({
-    businessName: '', address: '', city: '', pin: '', state: '', country: detectedCountry, gstin: '', pan: '',
+    businessName: '', address: '', city: '', pin: '', state: '', country: 'India', gstin: '', pan: '',
     email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
     logo: '', signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
   });
-  const [region, setRegion] = useState(detectedCountry === 'India' ? 'india' : 'international');
+  // v1.10.67 (#66 item 2, @sangwanmail-eng) — this is an India-first GST app,
+  // so India is the default. It used to be chosen from the browser locale, and
+  // a Windows set to en-US started people on "Outside India" with a United
+  // States company profile. The other two options are one click away.
+  const [region, setRegion] = useState('india');
   const [saving, setSaving] = useState(false);
   const cc = getCountryConfig(profile.country);
   const stateOptions = getStatesForCountry(profile.country);
@@ -247,7 +252,7 @@ export default function WelcomeGuide({ onComplete }) {
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                   <div className="form-group">
-                    <label className="form-label">IFSC Code</label>
+                    <label className="form-label">{cc.bankLabel || 'IFSC Code'}</label>
                     <input type="text" name="ifsc" className="form-input" value={profile.ifsc} onChange={handleChange}
                       placeholder="e.g. HDFC0001234" style={{ textTransform: 'uppercase' }} />
                   </div>
@@ -298,8 +303,8 @@ export default function WelcomeGuide({ onComplete }) {
                 {[
                   { num: '1', title: 'Create your first invoice', desc: 'Click "New Invoice" in the sidebar. Pick invoice type, add client details and line items.' },
                   { num: '2', title: 'Download or share', desc: 'Generate PDF, share via WhatsApp or email. UPI QR auto-appears if you added your UPI ID.' },
-                  { num: '3', title: 'Check GST reports', desc: 'After a few invoices, go to "Reports & P&L". Your GSTR-1, GSTR-3B, and HSN data is auto-generated.' },
-                  { num: '4', title: 'File GST returns', desc: 'Download CSVs from Reports → Upload to GST portal. Follow the built-in "GST Filing" guide for step-by-step help.' },
+                  { num: '3', title: 'Check GST reports', desc: 'After a few invoices, open "GST Returns" in the sidebar. Your GSTR-1, GSTR-3B and HSN summary are built from them.' },
+                  { num: '4', title: 'File GST returns', desc: 'Download the GSTR-1 JSON from GST Returns and upload it on the GST portal. The Filing Guide tab there walks you through it.' },
                 ].map((item) => (
                   <div key={item.num} style={{ display: 'flex', gap: '1rem', padding: '0.75rem 0', borderBottom: '1px solid var(--border-color)' }}>
                     <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: 'var(--primary)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', fontWeight: 700, flexShrink: 0 }}>
