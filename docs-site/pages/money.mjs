@@ -108,8 +108,9 @@ export default [
   <tr><td>3.1 Outward supplies</td><td>(a) taxable sales, (b) zero-rated exports with their IGST, (c) nil</td></tr>
   <tr><td>3.2 Inter-state to unregistered</td><td>Your inter-state sales to unregistered buyers, by state</td></tr>
   <tr><td>4 Eligible ITC</td><td>Credit from purchases and expenses, by IGST, CGST and SGST</td></tr>
-  <tr><td>6 Tax payment</td><td>Output tax, less credit, and the <b>Net Tax Payable</b> for each tax</td></tr>
+  <tr><td>6 Tax payment</td><td>Output tax, the credit used against it, and the <b>Net Tax Payable</b> for each tax, plus any credit carried forward</td></tr>
 </table>
+<p>Credit is used in the order the law sets: IGST credit first (against IGST, then CGST, then SGST), then CGST credit (against CGST, then IGST) and SGST credit (against SGST, then IGST). CGST credit never pays SGST, nor SGST credit CGST. So credit you hold in CGST and SGST can pay a tax that is all IGST.</p>
 <p>The <b>Net GST Payable</b> box shows the amount to pay through the Electronic Cash Ledger, or "ITC covers your liability".</p>
 <p>${ui('3B CSV')} and ${ui('3B JSON')} download it. The portal now fills most of GSTR-3B from your GSTR-1, so use the app's figures to check what it shows before you pay and file.</p>
 <div class="note warn"><strong>Check the credit against GSTR-2B</strong>
@@ -166,7 +167,7 @@ export default [
 {
   slug: 'reports',
   title: 'Reports',
-  lead: 'Profit and loss, who owes you and for how long, your best clients, and your best-selling products.',
+  lead: 'Profit and loss, who owes you and for how long, party outstanding by month, your best clients, and your best-selling products.',
   body: `
 <section id="included">
 <h2>What the reports include</h2>
@@ -191,6 +192,17 @@ export default [
 <h2>Outstanding &amp; Aging</h2>
 <p>Every unpaid or part-paid invoice, whatever its date, grouped by how late it is: <b>Current (0-30 days)</b>, <b>31-60</b>, <b>61-90</b> and <b>90+ days</b>, counted from the due date.</p>
 <p>The table lists client, invoice, date, due date, amount, paid, outstanding and days overdue, latest first, with the worst in red. <b>Filter by client name…</b> narrows the table and the totals together.</p>
+</section>
+
+<section id="party-outstanding">
+<h2>Party Outstanding</h2>
+<p>The same money owed, laid out the way Tally does it: one row per party, one column per month, a <b>Total</b> for each party on the right and for each month at the bottom. Each unpaid amount sits in the month of its invoice.</p>
+<ul>
+  <li>Choose <b>Financial year (Apr-Mar)</b>, the default, or <b>Calendar year (Jan-Dec)</b>, and the year.</li>
+  <li>Bills from before that year that are still unpaid appear in an <b>Earlier</b> column, so nothing owed drops out of the total.</li>
+  <li>${ui('Print / PDF')} opens the table on its own page, landscape; choose your printer or Save as PDF. ${ui('CSV')} downloads it for Excel.</li>
+</ul>
+<p>Only sales count; estimates, challans and cancelled invoices are left out. With invoices in more than one currency, pick the currency.</p>
 </section>
 
 <section id="clients">

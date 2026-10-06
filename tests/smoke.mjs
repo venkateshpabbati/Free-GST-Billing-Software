@@ -356,14 +356,26 @@ try {
   // fail while the app behaved correctly. Original is restored below so the
   // suite leaves the user's business name untouched.
   const nameField = page.locator('#section-company input[name="businessName"]');
+  // The form unlocks once the saved profile has loaded (v1.10.75).
+  await page.waitForFunction(() => document.querySelector('#section-company fieldset')?.disabled === false, null, { timeout: 30000 });
   const originalName = await nameField.inputValue();
   await nameField.fill(`Smoke Test ${Date.now()}`);
-  await sleep(700);
-  check('#43 editing the profile surfaces an unsaved-changes bar', await barShown());
+  // Poll rather than a fixed pause: on a loaded machine the re-render can take
+  // longer than 700 ms, and that failed the gate with the app working fine.
+  const barWithin = async (ms) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(250)) { if (await barShown()) return true; } return barShown(); };
+  const dirtyShown = await barWithin(5000);
+  const dirtyWhy = dirtyShown ? '' : JSON.stringify(await page.evaluate(() => ({
+    title: document.querySelector('.page-title')?.innerText,
+    bar: document.querySelector('.settings-savebar')?.innerText.replace(/\s+/g, ' '),
+    name: document.querySelector('#section-company input[name="businessName"]')?.value,
+    modal: document.querySelector('.modal-overlay')?.innerText.slice(0, 80),
+  })));
+  if (!dirtyShown && process.env.SMOKE_FAIL_SHOT) await page.screenshot({ path: process.env.SMOKE_FAIL_SHOT.replace(/\.png$/, '-43.png') }).catch(() => {});
+  check('#43 editing the profile surfaces an unsaved-changes bar', dirtyShown, dirtyWhy);
 
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await sleep(600);
-  check('#43 that bar stays reachable after scrolling', await barShown());
+  check('#43 that bar stays reachable after scrolling', await barWithin(3000));
 
   // #44: the bar must clear once the profile is actually on disk, and must
   // NOT come back when the page is revisited. v1.10.55 recorded the saved
@@ -639,6 +651,20 @@ try {
   const rep2 = await expenseCard();
   check('#64 reports ignore another company\'s expenses', close(rep1, rep0), `${rep0} -> ${rep1}`);
   check('#64 reports include this company\'s expenses (sanity)', close(rep2, rep0 + 2222), `${rep0} -> ${rep2}`);
+
+  // ---- v1.10.75: Party Outstanding - unpaid part, invoice month, this company only
+  const partyBill = (id, gstin, name, total, paid) => ({ id, invoiceNumber: id.toUpperCase(), clientName: 'Smoke Party Client',
+    status: paid ? 'partial' : 'unpaid', totalAmount: total, paidAmount: paid, invoiceDate: today, payments: [], items: [],
+    data: { profile: { gstin, businessName: name }, details: {}, totals: { total } } });
+  await api('/api/bills', partyBill('smoketest-party-a', OTHER_GSTIN, 'Smoke Beta', 2345.5, 345.5));
+  await api('/api/bills', partyBill('smoketest-party-b', THIRD_GSTIN, 'Smoke Third', 999999, 0));
+  await reopenView('Reports');
+  await page.evaluate(() => [...document.querySelectorAll('button')].find((x) => x.innerText.trim() === 'Party Outstanding')?.click());
+  await sleep(1000);
+  const partyRow = await page.evaluate(() => [...document.querySelectorAll('tr')]
+    .find((r) => r.innerText.trim().startsWith('Smoke Party Client'))?.innerText.replace(/\s+/g, ' ') || '');
+  check('v75 Party Outstanding shows the unpaid part in its month, and not another company\'s bill',
+    (partyRow.match(/2,000\.00/g) || []).length === 2 && !partyRow.includes('9,99,999'), partyRow.slice(0, 200));
 
   // ---- #64: GSTR-3B input tax credit counted every company's purchases -----
   const netItc = async () => {
@@ -1036,17 +1062,57 @@ try {
   });
   check('#66 the stamp prints next to the signature', !!stampShown?.stamp && !!stampShown?.sig, JSON.stringify(stampShown));
 
-  // ---- #66 item 9: Settings always shows one Save at the top -------------
+  // ---- #66 item 9 / v1.10.75: one Save for all of Settings, pinned at the bottom
   await openView('Settings');
   await sleep(2000);
   const saveBar = await page.evaluate(() => {
-    const btn = [...document.querySelectorAll('button')].find((b) => /Save Profile/i.test(b.innerText));
+    const btn = [...document.querySelectorAll('button')].find((b) => /Save all changes/i.test(b.innerText));
     if (!btn) return null;
-    const bar = btn.closest('div[style*="sticky"]');
-    return { hasButton: true, sticky: !!bar, top: bar ? Math.round(bar.getBoundingClientRect().top) : null };
+    const bar = btn.closest('.settings-savebar');
+    return { docked: !!bar && getComputedStyle(bar).position === 'fixed', bottomGap: bar ? Math.round(innerHeight - bar.getBoundingClientRect().bottom) : null };
   });
-  check('#66 Settings keeps one Save button pinned at the top',
-    !!saveBar?.hasButton && !!saveBar?.sticky && saveBar.top < 200, JSON.stringify(saveBar));
+  check('#66 Settings keeps one Save button docked along the bottom edge',
+    !!saveBar?.docked && saveBar.bottomGap === 0, JSON.stringify(saveBar));
+  const jumpScrolls = await page.evaluate(() => {
+    const n = document.querySelector('.settings-jumpnav');
+    return n ? n.scrollWidth > n.clientWidth + 1 : null;
+  });
+  check('v75 the Settings section buttons never scroll sideways', jumpScrolls === false, String(jumpScrolls));
+
+  // One click saves two different sections.
+  const getMeta = (key) => page.evaluate(async (k) => ((await (await fetch('/api/meta/' + k)).json()).value || {}), key);
+  const nameBefore = await page.locator('#section-company input[name="businessName"]').inputValue();
+  const numBefore = await getMeta('invoiceNumberSettings');
+  await page.locator('#section-company input[name="businessName"]').fill(`Smoke SaveAll ${Date.now() % 100000}`);
+  await page.evaluate(() => document.querySelectorAll('details').forEach((d) => { d.open = true; }));
+  await page.locator('input[placeholder^="e.g. ACME"]').fill('SMKALL');
+  await sleep(500);
+  await page.getByRole('button', { name: /Save all changes/i }).click();
+  await sleep(2500);
+  const savedName = await page.evaluate(async () => (await (await fetch('/api/profile')).json()).businessName);
+  const savedPrefix = (await getMeta('invoiceNumberSettings')).brandPrefix;
+  check('v75 "Save all changes" saves Company Details and Invoice Number Format together',
+    /^Smoke SaveAll/.test(savedName || '') && savedPrefix === 'SMKALL', `name=${savedName} prefix=${savedPrefix}`);
+  // Put both back.
+  await page.locator('#section-company input[name="businessName"]').fill(nameBefore);
+  await page.locator('input[placeholder^="e.g. ACME"]').fill(numBefore.brandPrefix || '');
+  await sleep(500);
+  await page.getByRole('button', { name: /Save all changes/i }).click();
+  await sleep(2500);
+  check('v75 after saving, the bar says everything is saved',
+    await page.evaluate(() => /All changes saved/.test(document.querySelector('.settings-savebar')?.innerText || '')));
+
+  // ---- v1.10.75: the app-wide round-off switch saves the invoice default --
+  const roundOffBox = page.locator('label', { hasText: 'Round off invoice totals' }).locator('input[type="checkbox"]');
+  const roundOffBefore = await roundOffBox.isChecked();
+  await roundOffBox.click();
+  await sleep(1500);
+  const roundOffSaved = await page.evaluate(async () =>
+    ((await (await fetch('/api/meta/invoiceDisplayOptions')).json()).value || {}).showRoundOff);
+  await roundOffBox.click(); // put it back
+  await sleep(1500);
+  check('v75 Settings round-off switch saves the invoice default',
+    roundOffSaved === !roundOffBefore, `was ${roundOffBefore}, saved ${roundOffSaved}`);
 
   // ---- #68: a GSTIN fills in the state, offline -------------------------
   await openDraft({
@@ -1367,6 +1433,65 @@ try {
     ]);
     check('v71 Bulk PDF downloads a PDF of the ticked invoices', !!dl && /\.pdf$/i.test(dl.suggestedFilename()), dl ? dl.suggestedFilename() : 'no download');
     await page.fill('input[placeholder="Search client or invoice..."]', '');
+  }
+
+  // ---- v1.10.76: stock follows edits (#80), quotations (#83), refresh while editing
+  {
+    const get76 = (url) => page.evaluate(async (url) => (await fetch(url)).json(), url);
+    const post76 = (url, body) => page.evaluate(async ({ url, body }) => (await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).ok, { url, body });
+    const stock76 = async () => (await get76('/api/products')).find((x) => x.id === 'smoketest-pen')?.stock;
+    const prof76 = await get76('/api/profile');
+    const bill76 = (id, type, q, applied) => ({
+      id, invoiceNumber: id, clientName: 'Smoke Test Client', invoiceDate: today, invoiceType: type, status: 'unpaid',
+      totalAmount: q * 11.8, paidAmount: 0, payments: [],
+      data: { profile: prof76, client: { name: 'Smoke Test Client', state: prof76.state, country: 'India' },
+        details: { invoiceNumber: id, invoiceDate: today }, invoiceType: type, invoiceOptions: {}, totals: { total: q * 11.8 },
+        items: [{ id: 'l1', productId: 'smoketest-pen', name: 'Smoke Pen', hsn: '9608', quantity: q, rate: 10, taxPercent: 18, discount: 0, unit: 'Pcs' }],
+        ...(applied ? { stockApplied: applied } : {}) },
+    });
+    // Opening it through the saved session is a page refresh while editing,
+    // which blanked the whole app before v1.10.76.
+    const openForEdit76 = async (bill) => {
+      await page.evaluate((bill) => { sessionStorage.setItem('gst_editingBill', JSON.stringify(bill)); sessionStorage.setItem('gst_currentView', 'new'); sessionStorage.removeItem('gst_invoiceDraft'); }, bill);
+      await page.reload({ waitUntil: 'networkidle' });
+      await sleep(2500);
+      await dismissFirstRun(page);
+      return page.waitForSelector('#invoice-preview', { timeout: 30000 }).then(() => true).catch(() => false);
+    };
+    const save76 = async () => { await page.getByRole('button', { name: /^Save$/ }).first().click(); await sleep(3500); };
+    const toDashboard76 = async () => {
+      await page.evaluate(() => { sessionStorage.removeItem('gst_editingBill'); sessionStorage.setItem('gst_currentView', 'dashboard'); });
+      await page.reload({ waitUntil: 'networkidle' });
+      await sleep(3000);
+      await dismissFirstRun(page);
+    };
+
+    await post76('/api/products', { id: 'smoketest-pen', name: 'Smoke Pen', hsn: '9608', rate: 10, taxPercent: 18, unit: 'Pcs', stock: 40 });
+    const inv76 = bill76('smoketest-inv76', 'tax-invoice', 10, { 'smoketest-pen': -10 });
+    await post76('/api/bills', inv76);
+    check('v76 refreshing the page while editing an invoice keeps the app on screen', await openForEdit76(inv76));
+    await page.locator('.line-item-field', { has: page.locator('label', { hasText: /^Qty$/ }) }).locator('input').first().fill('15');
+    await sleep(500);
+    await save76();
+    check('v76 #80 editing a quantity 10 -> 15 takes exactly 5 more from stock', (await stock76()) === 35, `stock=${await stock76()}`);
+    await save76();
+    check('v76 #80 saving again unchanged moves no stock', (await stock76()) === 35, `stock=${await stock76()}`);
+
+    await post76('/api/bills', bill76('smoketest-quo76', 'quotation', 5, {}));
+    await toDashboard76();
+    const quoRow = () => page.locator('tr', { hasText: 'smoketest-quo76' }).first();
+    check('v76 #83 a quotation has no Paid/Unpaid menu', (await quoRow().locator('select.status-select').count()) === 0);
+    check('v76 #80 a quotation takes no stock', (await stock76()) === 35, `stock=${await stock76()}`);
+    await quoRow().locator('button[title="Convert to Tax Invoice"]').click();
+    await sleep(3000);
+    await page.waitForSelector('#invoice-preview', { timeout: 30000 });
+    await save76();
+    const quo76 = (await get76('/api/bills')).find((x) => x.id === 'smoketest-quo76');
+    check('v76 #83 a converted quotation is marked and the invoice takes the stock once',
+      !!quo76?.convertedTo && (await stock76()) === 30, `convertedTo=${quo76?.convertedTo} stock=${await stock76()}`);
+    await toDashboard76();
+    check('v76 #83 its Convert button is gone', (await quoRow().locator('button[title="Convert to Tax Invoice"]').count()) === 0);
   }
 
   // Put the real business details back.

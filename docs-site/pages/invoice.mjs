@@ -149,7 +149,7 @@ export default [
 
 <section id="tax-inclusive">
 <h2>Prices that already include GST</h2>
-<p>If your rates already include GST, tick <b>Prices include tax</b> at the top of the Line Items card. The GST is then worked out backwards from each rate, and the invoice shows the taxable value and the tax separately.</p>
+<p>If your rates already include GST, tick <b>Prices include tax</b> at the top of the Line Items card. The printed Subtotal is then the value before tax, so Subtotal + tax = Total. The GST is then worked out backwards from each rate, and the invoice shows the taxable value and the tax separately.</p>
 </section>
 
 <section id="discounts">
@@ -241,7 +241,8 @@ export default [
   <li>Uploads it to Google Drive, if you have connected Drive in <a href="settings.html#google-drive">Settings</a>.</li>
   <li>Prints it, if auto-print is on in <a href="print-settings.html#auto-print">Print Settings</a> or for this client.</li>
 </ol>
-<p>The first save of an invoice, however you save it, takes the items out of stock, for rows picked from your products. If stock runs low or out, you are told.</p>
+<p>Saving takes the items out of stock, for rows picked from your products; saving again after changing a quantity moves only the difference, and a quotation or proforma moves none (see <a href="products.html#stock">How stock is counted</a>). If stock runs low or out, you are told.</p>
+<p>If you change an invoice you have already downloaded or printed, a plain ${ui('Save')} also updates its PDF in the <code>Saved Invoices</code> folder, without downloading it again.</p>
 <p>Long invoices are split between rows, never through a row, and the signature and stamp are never cut across a page break: if they would be, the whole footer moves to the next page.</p>
 </section>
 
@@ -305,7 +306,7 @@ export default [
 
 <section id="proforma-to-invoice">
 <h2>Turning a quote into an invoice</h2>
-<p>When a client accepts a Quotation or a Proforma / Estimate, click ${ui('Convert to Tax Invoice')} on it in the Dashboard. A new tax invoice opens with the same client and items, and gets its own number when you save it. The same works for a delivery challan.</p>
+<p>When a client accepts a Quotation or a Proforma / Estimate, click ${ui('Convert to Tax Invoice')} on it in the Dashboard. A new tax invoice opens with the same client and items, and gets its own number when you save it. The same works for a delivery challan. Once saved, the original shows <b>Converted</b> and its Convert button goes away, so it cannot be turned into a second invoice by mistake.</p>
 </section>
 
 <section id="cancel">
@@ -387,14 +388,14 @@ export default [
   <tr><td>Client / Bill-to</td><td>Client address, phone, email, Place of Supply</td><td></td></tr>
   <tr><td>Invoice meta</td><td>Invoice number, invoice date, due date</td><td></td></tr>
   <tr><td>Items table</td><td>HSN/SAC column, Qty column, unit next to the quantity, Rate column, Discount column, Tax % column, GST Cess % column</td><td>GST Cess</td></tr>
-  <tr><td>Totals</td><td>Subtotal row, amount in words, round-off line, HSN/SAC tax summary table, tax amount in words</td><td>Round-off. The HSN summary and tax in words are on only in Tally style.</td></tr>
+  <tr><td>Totals</td><td>Subtotal row, amount in words, round-off line, HSN/SAC tax summary table, tax amount in words</td><td>The HSN summary and tax in words are on only in Tally style. Round-off follows <a href="print-settings.html#round-off">Print &amp; PDF</a> (on for new installs).</td></tr>
   <tr><td>Compliance flags</td><td>Reverse Charge applies</td><td>Reverse Charge</td></tr>
   <tr><td>Footer</td><td>Bank details, "Pay via" account label, UPI QR, signature block, "Authorized Signatory" caption, Terms &amp; Conditions, Notes, system-generated note, Declaration, "Customer's Seal and Signature" box</td><td>"Pay via" label, system-generated note. Declaration and the seal box are on only in Tally style.</td></tr>
 </table></div>
 <p>A few options do more than show or hide:</p>
 <ul>
   <li><strong>Tax % column</strong> off means no GST is charged at all, and the tax rows disappear from the totals. Bill of Supply and Delivery Challan turn it off for you.</li>
-  <li><strong>Round-off line</strong> rounds the grand total to the nearest rupee, and shows the difference.</li>
+  <li><strong>Round-off line</strong> rounds the grand total to the nearest rupee, and shows the difference. The default for new invoices is set in <a href="print-settings.html#round-off">Print &amp; PDF</a>.</li>
   <li><strong>Business state</strong> also hides the client's state, and <strong>Tax ID</strong> also hides the client's GSTIN.</li>
   <li><strong>Bank details</strong> also hides your PAN, which prints in the bank block.</li>
   <li><strong>GST Cess % column</strong> adds a Cess box to each row of the form. The printed invoice shows cess as one line in the totals.</li>

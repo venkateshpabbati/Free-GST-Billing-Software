@@ -720,6 +720,141 @@ and confirm the browser opens on `http://localhost:47371` with no warning.
 
 ---
 
+## ERR-043 - Refreshing the page while editing an invoice blanked the app
+
+**Version:** since v1.5.0 · fixed in v1.10.76
+**Reported by:** found while testing the #80 fix
+
+**Symptom** - press F5 (or the browser restores the tab) while an invoice is
+open for editing, and the whole app goes blank.
+
+**Cause** - the invoice template read `profile.swift` for the bank block. On
+a refresh the business profile is still loading on the first render, so
+`profile` was null, and an error while rendering unmounts the whole app.
+
+**Rule** - a component that can render before its data arrives treats the
+missing data as empty, never as an object that is certainly there.
+
+**Guard** - InvoicePreview uses `profile || {}`; the smoke check
+"refreshing the page while editing an invoice keeps the app on screen".
+
+---
+
+## ERR-042 - With "Prices include tax", Subtotal + tax did not equal the Total
+
+**Version:** since prices-include-tax was added · fixed in v1.10.76
+**Reported by:** @sangwanmail-eng (#83)
+
+**Symptom** - a ₹300 line at 0% and two ₹1,050 items at 18%, prices including
+tax: Subtotal ₹2,400, CGST ₹160.17, SGST ₹160.17, Total ₹2,400.
+
+**Cause** - the templates printed `totals.subtotal`, which with inclusive
+prices is the gross INCLUDING tax. The tax and total were right.
+
+**Rule** - a printed breakdown must add up on paper. With inclusive prices the
+Subtotal printed is the taxable value (before discount).
+
+**Guard** - `printedSubtotal()` in utils.js, used by every template and the
+WhatsApp text; tax-test "[V76] #83 printed Subtotal".
+
+---
+
+## ERR-041 - Purchase from another state not marked inter-state
+
+**Version:** · fixed in v1.10.76
+**Reported by:** @raviagrawal01 (#82)
+
+**Symptom** - a supplier GSTIN from another state left "Inter-state purchase"
+unticked, so the credit landed under CGST + SGST in GSTR-3B Table 4.
+
+**Cause** - the box was manual only, unlike sales invoices, which work it out.
+
+**Rule** - anything the GSTIN already tells us is filled in for the user, and
+left editable.
+
+**Guard** - `isInterstateSupply()`; tax-test "[V76] #82".
+
+---
+
+## ERR-040 - GSTR-3B Table 6 did not set CGST/SGST credit off against IGST
+
+**Version:** · fixed in v1.10.76
+**Reported by:** @raviagrawal01 (#81)
+
+**Symptom** - CGST ₹360 + SGST ₹360 credit, IGST ₹810 liability: Net Tax
+Payable ₹810. The law gives ₹90.
+
+**Cause** - each head was reduced only by its own credit.
+
+**Rule** - credit is set off in the legal order (Section 49(5), 49A,
+Rule 88A): IGST credit against IGST, then CGST, then SGST; CGST credit
+against CGST, then IGST; SGST credit against SGST, then IGST. Never CGST
+against SGST or the reverse.
+
+**Guard** - `setOffITC()`; tax-test "[V76] #81".
+
+---
+
+## ERR-039 - Stock ignored edits, and quotations took stock out
+
+**Version:** since stock tracking · fixed in v1.10.76
+**Reported by:** @raviagrawal01 (#80)
+
+**Symptom** - changing a saved invoice's quantity 10 -> 15 left stock at 40
+(expected 35). Quotations and proformas took stock out; converting one then
+took it out again; credit notes took stock out instead of putting it back.
+
+**Cause** - stock was moved once, on a bill's first save, by -quantity for
+every type, and never again (`stockDeducted` was true for any existing bill).
+
+**Rule** - every bill keeps a record of what it has done to stock
+(`data.stockApplied`), and each save applies only the difference to what it
+should do now (sales -qty, credit note +qty, quote/proforma/cancelled 0).
+Bills from before have no record and are taken to have done what the old
+code did: -quantity for every type (0 if cancelled or made by the recurring
+generator). The old code only moved stock on a bill's FIRST save, so an old
+bill whose quantity was edited later is taken to hold its current quantity,
+not its first one; that difference cannot be recovered and is accepted.
+Every save works from the server's copy of the bill (not the editor's), saves
+run one at a time, and a conversion takes over the original's record.
+
+**Guard** - `stockEffect` / `appliedStock` / `stockDelta`; tax-test "[V76]
+#80"; smoke checks "v76 #80 ...".
+
+---
+
+## ERR-038 - A new ZIP installed a second copy; updates left old files behind
+
+**Version:** since v1.10.44 (one-file launcher) · fixed in v1.10.75
+**Reported by:** the maintainer, on their own PC
+
+**Symptom** - after downloading a new version, the PC had two Free GST
+Billing apps (`Downloads\Free-GST-Billing-v1.10.68` and `...-v1.10.74`), each
+with its own invoices. The shortcuts moved to the new, empty one, so the
+invoices seemed to be gone. Separately, installs that started on an older
+version still had launchers and scripts under their old names, which also
+look like a second copy.
+
+**Cause** - every release ZIP extracts to a new versioned folder, and the
+launcher there saw "not installed in THIS folder" and offered Install, which
+made a second, complete install and repointed the shortcuts. The updater only
+ever copied files in; nothing removed the files a release renamed or retired.
+
+**Rule** - an installer looks for an existing install (the Desktop and
+Start-Menu shortcuts say where it is, plus the one-command install folder)
+before it installs, and sends the user to Update when it finds one. A release
+that renames or retires a file also deletes the old one on the next start -
+by exact name, only when its replacement is present, never inside `data`,
+`node`, `node_modules` or backups.
+
+**Guard** - `install-windows.ps1`, `install.ps1` and the launcher all stop
+with "Already installed in <folder>" (FREEGSTBILL_DIR still allows a
+deliberate second copy). `start-windows.ps1` / `start-unix.sh` remove the
+known obsolete files. Verified by hand on this PC: from a new folder the
+check finds the real install (v1.10.74, 2 invoices) and ignores its own.
+
+---
+
 ## ERR-037 - GSTR-3B counted exports twice; HSN summary added credit notes
 
 **Version:** broke before v1.10.67 · fixed in v1.10.74
