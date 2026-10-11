@@ -308,7 +308,7 @@ function toMarkdown(html) {
     .replace(/<li>/g, '\n- ')
     .replace(/<\/(p|ul|ol|table|div|section)>/g, '\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
     .replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n')
     .replace(/(\n- [^\n]*)\n\n(?=- )/g, '$1\n')
     .replace(/(\n- [^\n]*)\n\n(?=- )/g, '$1\n')
