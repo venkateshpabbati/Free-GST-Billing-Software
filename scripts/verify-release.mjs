@@ -164,7 +164,7 @@ try {
   }
   // The SPA must actually be served, not just a 200 from a fallback.
   const html = await (await fetch(server.url)).text();
-  if (!/<div id="root">|<script/.test(html)) {
+  if (!/<div id="root">|<script\b/i.test(html)) {
     fail('The server responded but did not serve the built app HTML.');
   }
 
