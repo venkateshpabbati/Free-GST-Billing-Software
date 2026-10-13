@@ -1319,25 +1319,16 @@ export const PAPER_SIZES = {
 // non-empty. The invoice then printed a "Terms & Conditions" heading with
 // nothing underneath it.
 //
-// Parsing decodes entities, and String.trim() treats U+00A0 as
-// whitespace, so a cleared field correctly reads as empty. Parsing is
-// also robust against tag text the regex mis-handles, e.g.
-// `<div title="a>b">`.
-//
-// Note this is an EMPTINESS CHECK, not a sanitisation boundary — the
-// rendering path still runs the HTML through DOMPurify. Parsing with
-// DOMParser is inert: it builds a detached document that never executes
-// scripts or loads resources.
+// Keep this as a pure emptiness check and avoid any HTML parser sink:
+// treat input as text, remove tags, normalise common NBSP entities, then trim.
+// Rendering remains protected separately by DOMPurify.
 export const htmlHasText = (html) => {
   if (!html) return false;
-  try {
-    const doc = new DOMParser().parseFromString(String(html), 'text/html');
-    return (doc.body?.textContent || '').trim().length > 0;
-  } catch {
-    // Non-browser context (SSR, tests) — fall back to the old behaviour
-    // rather than reporting every field as empty.
-    return String(html).replace(/<[^>]*>/g, '').trim().length > 0;
-  }
+  const text = String(html)
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, ' ')
+    .trim();
+  return text.length > 0;
 };
 
 export const getPaperSize = (key, options = {}) => {
