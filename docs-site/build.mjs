@@ -298,7 +298,7 @@ ${body}
 function toMarkdown(html) {
   return html
     .replace(/<figure>[\s\S]*?<\/figure>/g, '')
-    .replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (_, c) => `\n\`\`\`\n${c.replace(/<[^>]+>/g, '')}\n\`\`\`\n`)
+    .replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (_, c) => `\n\`\`\`\n${c.replace(/[<>]/g, '')}\n\`\`\`\n`)
     .replace(/<h2>([\s\S]*?)<\/h2>/g, (_, t) => `\n## ${text(t)}\n`)
     .replace(/<h3>([\s\S]*?)<\/h3>/g, (_, t) => `\n### ${text(t)}\n`)
     .replace(/<a href="([a-z0-9-]+)\.html(#[a-z0-9-]+)?">([\s\S]*?)<\/a>/g, (_, s, h, t) => `[${text(t)}](${pageUrl(s)}${h || ''})`)
