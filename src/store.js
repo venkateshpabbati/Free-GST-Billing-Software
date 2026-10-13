@@ -138,6 +138,23 @@ export const setEnabledModules = (map) => {
 // Used by InvoiceGenerator to show the next number on form mount — the atomic
 // reservation happens only when the user actually saves. Cancelled forms no
 // longer burn counter values, so CA-audited businesses keep gapless sequences.
+function secureRandomBase36(length = 6) {
+  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const out = [];
+  const maxUnbiased = 252; // largest multiple of 36 below 256
+  const bytes = new Uint8Array(length * 2);
+
+  while (out.length < length) {
+    crypto.getRandomValues(bytes);
+    for (let i = 0; i < bytes.length && out.length < length; i += 1) {
+      const v = bytes[i];
+      if (v < maxUnbiased) out.push(alphabet[v % 36]);
+    }
+  }
+
+  return out.join('');
+}
+
 export const getNextInvoiceNumber = async (prefix = 'INV', { peek = false, explicitPrefix = false } = {}) => {
   const settings = await getInvoiceNumberSettings();
   const key = `counter_${prefix}`;
@@ -159,7 +176,7 @@ export const getNextInvoiceNumber = async (prefix = 'INV', { peek = false, expli
   const pfx = explicitPrefix ? prefix : (settings.brandPrefix || prefix);
 
   if (settings.format === 'random') {
-    const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const rand = secureRandomBase36(6);
     return `${pfx}${settings.separator}${rand}`;
   }
 
